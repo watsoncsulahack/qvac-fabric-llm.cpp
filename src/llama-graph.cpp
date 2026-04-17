@@ -1675,7 +1675,10 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * v_mla,
             float     kq_scale,
             int       il) const {
-    GGML_ASSERT(v_mla == nullptr);
+    // TurboQuant/PolarQuant KV-cache rotation is incompatible with MLA absorption
+    // (DeepSeek-V2/V3 pass wv_b as v_mla here). Only enforce when the rotation
+    // path is actually active; otherwise this overload must still support MLA.
+    GGML_ASSERT(!(inp->self_rotk || inp->self_rotv) || v_mla == nullptr);
 
     if (inp->self_rotk) {
         q_cur = ggml_rotate_hadamard(ctx0, q_cur, inp->self_rotk);
