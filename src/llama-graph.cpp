@@ -49,6 +49,25 @@ static ggml_tensor * ggml_rotate_hadamard(
     return res;
 }
 
+// Allocate the Hadamard rotation input used by ggml_rotate_hadamard() for a
+// TurboQuant/PolarQuant K or V stream. Size is the largest power-of-two that
+// divides n_embd_head (>= 64), so the rotation matches the head dim and the
+// PQ/TBQ codebooks see the full d-wide rotated distribution they were fitted
+// to. Returns nullptr when can_rot is false.
+static ggml_tensor * build_hadamard_rot(ggml_context * ctx, bool can_rot, int n_embd_head) {
+    if (!can_rot) {
+        return nullptr;
+    }
+
+    int nrot = 64;
+    do { nrot *= 2; } while (n_embd_head % nrot == 0);
+    nrot /= 2;
+
+    ggml_tensor * rot = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nrot, nrot);
+    ggml_set_input(rot);
+    return rot;
+}
+
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
         const int64_t n_tokens = ubatch->n_tokens;
@@ -1626,30 +1645,13 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
             hparams.n_embd_head_k % 64 == 0 &&
             ggml_is_quantized(mctx_cur->type_k());
 
-        if (can_rotk) {
-            int nrot = 64;
-            do { nrot *= 2; } while (hparams.n_embd_head_k % nrot == 0);
-            nrot /= 2;
-
-            inp->self_rotk = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, nrot, nrot);
-            ggml_set_input(inp->self_rotk);
-        } else {
-            inp->self_rotk = nullptr;
-        }
-
         const bool can_rotv =
             !hparams.is_n_embd_v_gqa_variable() &&
             hparams.n_embd_head_v % 64 == 0 &&
             ggml_is_quantized(mctx_cur->type_v());
 
-        if (can_rotv) {
-            int nrot = 64;
-
-            inp->self_rotv = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, nrot, nrot);
-            ggml_set_input(inp->self_rotv);
-        } else {
-            inp->self_rotv = nullptr;
-        }
+        inp->self_rotk = build_hadamard_rot(ctx0, can_rotk, hparams.n_embd_head_k);
+        inp->self_rotv = build_hadamard_rot(ctx0, can_rotv, hparams.n_embd_head_v);
     }
 
     return inp;
@@ -1947,30 +1949,13 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
             hparams.n_embd_head_k % 64 == 0 &&
             ggml_is_quantized(mctx_cur->get_base()->type_k());
 
-        if (can_rotk) {
-            int nrot = 64;
-            do { nrot *= 2; } while (hparams.n_embd_head_k % nrot == 0);
-            nrot /= 2;
-
-            inp->self_rotk = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, nrot, nrot);
-            ggml_set_input(inp->self_rotk);
-        } else {
-            inp->self_rotk = nullptr;
-        }
-
         const bool can_rotv =
             !hparams.is_n_embd_v_gqa_variable() &&
             hparams.n_embd_head_v % 64 == 0 &&
             ggml_is_quantized(mctx_cur->get_base()->type_v());
 
-        if (can_rotv) {
-            int nrot = 64;
-
-            inp->self_rotv = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, nrot, nrot);
-            ggml_set_input(inp->self_rotv);
-        } else {
-            inp->self_rotv = nullptr;
-        }
+        inp->self_rotk = build_hadamard_rot(ctx0, can_rotk, hparams.n_embd_head_k);
+        inp->self_rotv = build_hadamard_rot(ctx0, can_rotv, hparams.n_embd_head_v);
     }
 
     return (llm_graph_input_attn_kv_iswa *) res->add_input(std::move(inp));
