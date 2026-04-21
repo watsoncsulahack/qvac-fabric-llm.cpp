@@ -55,6 +55,22 @@ else
 fi
 echo ""
 
+# Guard against regressions in the shared MUL_MAT dispatcher. Our widening of
+# `supports_op` (pipeline_cpy_quant_f16) relaxed the non-dim01-contiguous rule
+# for every quantized src0 type, not just TBQ/PQ. So the same dispatcher bug
+# that breaks TBQ/PQ also breaks upstream q8_0 with a permuted src0. Picking
+# q8_0 here means the check runs on any Vulkan box (no TBQ model needed) and
+# keeps the regression catchable under the "tbq|pq" narrow filter above.
+echo "=== test-backend-ops (q8_0 MUL_MAT with permuted src0, shared dispatcher sanity) ==="
+if [ -f "$B/bin/test-backend-ops" ]; then
+    "$B/bin/test-backend-ops" test \
+        -p 'type_a=q8_0.*per=\[0,2,1,3\]' \
+        || num_failed=$((num_failed + 1))
+else
+    echo "SKIP: $B/bin/test-backend-ops not found"
+fi
+echo ""
+
 echo "=========================================="
 if [ "$num_failed" -eq 0 ]; then
     echo " All checks passed."
