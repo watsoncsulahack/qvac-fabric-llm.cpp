@@ -7514,6 +7514,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 32, 256, {1, 1}, {1, 1}));
             }
         }
+        // Non-dim01-contiguous small-n TBQ/PQ routes away from the vec path.
+        // TBQ still needs the standalone QJL correction there; PQ is the control.
+        const ggml_type tbq_pq_all[] = {
+            GGML_TYPE_TBQ3_0,    GGML_TYPE_TBQ4_0,    GGML_TYPE_PQ3_0,    GGML_TYPE_PQ4_0,
+            GGML_TYPE_TBQ3_0_64, GGML_TYPE_TBQ4_0_64, GGML_TYPE_PQ3_0_64, GGML_TYPE_PQ4_0_64,
+        };
+        for (ggml_type type_a : tbq_pq_all) {
+            for (ggml_type type_b : { GGML_TYPE_F32, GGML_TYPE_F16 }) {
+                test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, 256, {2, 3}, {1, 1}, {0, 2, 1, 3}));
+                test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 8, 256, {2, 3}, {1, 1}, {0, 2, 1, 3}));
+            }
+        }
     }
 #else
     // m = a rows
