@@ -963,10 +963,12 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "MEAN",
     "ARGMAX",
     "COUNT_EQUAL",
+    "COUNT_EQUAL_MASKED",
     "REPEAT",
     "REPEAT_BACK",
     "CONCAT",
     "SILU_BACK",
+    "GEGLU_BACK",
     "NORM",
     "RMS_NORM",
     "RMS_NORM_BACK",
@@ -1030,6 +1032,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "RWKV_WKV6",
     "GATED_LINEAR_ATTN",
     "RWKV_WKV7",
+    "DELTA_NET_AR",
     "SOLVE_TRI",
 
     "UNARY",
@@ -1042,13 +1045,15 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
 
     "CROSS_ENTROPY_LOSS",
     "CROSS_ENTROPY_LOSS_BACK",
+    "CROSS_ENTROPY_LOSS_MASKED",
+    "CROSS_ENTROPY_LOSS_MASKED_BACK",
     "OPT_STEP_ADAMW",
     "OPT_STEP_SGD",
 
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1072,10 +1077,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "Σx/n",
     "argmax(x)",
     "count_equal(x)",
+    "count_equal_masked(x)",
     "repeat(x)",
     "repeat_back(x)",
     "concat(x, y)",
     "silu_back(x)",
+    "geglu_back(x)",
     "norm(x)",
     "rms_norm(x)",
     "rms_norm_back(x)",
@@ -1139,6 +1146,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "rwkv_wkv6(k, v, r, tf, td, s)",
     "gated_linear_attn(k, v, q, gate, s)",
     "rwkv_wkv7(r, w, k, v, a, b, s)",
+    "delta_net_ar(s, q, k, v, g, beta)",
     "A X = B, A triangular, solve X",
 
     "unary(x)",
@@ -1151,13 +1159,15 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
 
     "cross_entropy_loss(x,y)",
     "cross_entropy_loss_back(x,y)",
+    "cross_entropy_loss_masked(x,y)",
+    "cross_entropy_loss_masked_back(x,y)",
     "adamw(x)",
     "sgd(x)",
 
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -2487,6 +2497,26 @@ struct ggml_tensor * ggml_count_equal(
     return result;
 }
 
+// ggml_count_equal_masked
+
+struct ggml_tensor * ggml_count_equal_masked(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        struct ggml_tensor  * c) {
+    GGML_ASSERT(ggml_are_same_shape(a, b));
+    GGML_ASSERT(c->type == GGML_TYPE_F32);
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, 1);
+
+    result->op     = GGML_OP_COUNT_EQUAL_MASKED;
+    result->src[0] = a;
+    result->src[1] = b;
+    result->src[2] = c;
+
+    return result;
+}
+
 // ggml_repeat
 
 struct ggml_tensor * ggml_repeat(
@@ -2793,6 +2823,19 @@ struct ggml_tensor * ggml_silu_back(
     return result;
 }
 
+// ggml_geglu_back
+struct ggml_tensor * ggml_geglu_back(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * grad,
+        struct ggml_tensor  * g) {
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, g);
+
+    result->op     = GGML_OP_GEGLU_BACK;
+    result->src[0] = grad;
+    result->src[1] = g;
+
+    return result;
+}
 // ggml hardswish
 
 struct ggml_tensor * ggml_hardswish(
@@ -5767,6 +5810,59 @@ struct ggml_tensor * ggml_rwkv_wkv7(
     return result;
 }
 
+// ggml_delta_net_ar
+
+struct ggml_tensor * ggml_delta_net_ar(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * s,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta) {
+    GGML_ASSERT(s); GGML_ASSERT(q); GGML_ASSERT(k); GGML_ASSERT(v); GGML_ASSERT(g); GGML_ASSERT(beta);
+    GGML_ASSERT(s->type    == GGML_TYPE_F32);
+    GGML_ASSERT(q->type    == GGML_TYPE_F32);
+    GGML_ASSERT(k->type    == GGML_TYPE_F32);
+    GGML_ASSERT(v->type    == GGML_TYPE_F32);
+    GGML_ASSERT(g->type    == GGML_TYPE_F32);
+    GGML_ASSERT(beta->type == GGML_TYPE_F32);
+
+    GGML_ASSERT(ggml_is_contiguous(s));
+    GGML_ASSERT(ggml_is_contiguous(q));
+    GGML_ASSERT(ggml_is_contiguous(k));
+    GGML_ASSERT(ggml_is_contiguous(v));
+    GGML_ASSERT(ggml_is_contiguous(g));
+    GGML_ASSERT(ggml_is_contiguous(beta));
+
+    const int64_t S = s->ne[0];
+    const int64_t H = s->ne[2];
+    const int64_t N = s->ne[3];
+
+    GGML_ASSERT(s->ne[1] == S);
+    GGML_ASSERT(q->ne[0] == S && q->ne[1] == 1 && q->ne[2] == H && q->ne[3] == N);
+    GGML_ASSERT(k->ne[0] == S && k->ne[1] == 1 && k->ne[2] == H && k->ne[3] == N);
+    GGML_ASSERT(v->ne[0] == S && v->ne[1] == 1 && v->ne[2] == H && v->ne[3] == N);
+    GGML_ASSERT(g->ne[1] == 1 && g->ne[2] == H && g->ne[3] == N);
+    GGML_ASSERT(g->ne[0] == 1 || g->ne[0] == S);
+    GGML_ASSERT(beta->ne[0] == 1 && beta->ne[1] == 1 && beta->ne[2] == H && beta->ne[3] == N);
+
+    // Packed 1D result: [o (S*H*N) | s_out (S*S*H*N)].
+    const int64_t n_o     = S * H * N;
+    const int64_t n_s_out = S * S * H * N;
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_o + n_s_out);
+
+    result->op     = GGML_OP_DELTA_NET_AR;
+    result->src[0] = s;
+    result->src[1] = q;
+    result->src[2] = k;
+    result->src[3] = v;
+    result->src[4] = g;
+    result->src[5] = beta;
+
+    return result;
+}
+
 // ggml_unary
 
 static struct ggml_tensor * ggml_unary_impl(
@@ -6017,6 +6113,9 @@ struct ggml_tensor * ggml_cross_entropy_loss(
     result->op     = GGML_OP_CROSS_ENTROPY_LOSS;
     result->src[0] = a;
     result->src[1] = b;
+    
+    // Initialize op_params to 0 (no masking)
+    *(int32_t *)(result->op_params) = 0;
 
     return result;
 }
@@ -6037,6 +6136,51 @@ struct ggml_tensor * ggml_cross_entropy_loss_back(
     result->src[0] = a;
     result->src[1] = b;
     result->src[2] = c;
+
+    return result;
+}
+
+// ggml_cross_entropy_loss_masked
+
+struct ggml_tensor * ggml_cross_entropy_loss_masked(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        struct ggml_tensor  * c) {
+    GGML_ASSERT(ggml_are_same_shape(a, b));
+    GGML_ASSERT(ggml_are_same_shape(a, c));
+    GGML_ASSERT(c->type == GGML_TYPE_F32);
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, a->type, 1);
+
+    result->op     = GGML_OP_CROSS_ENTROPY_LOSS_MASKED;
+    result->src[0] = a;
+    result->src[1] = b;
+    result->src[2] = c;
+
+    return result;
+}
+
+// ggml_cross_entropy_loss_masked_back
+
+struct ggml_tensor * ggml_cross_entropy_loss_masked_back(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        struct ggml_tensor  * c,
+        struct ggml_tensor  * d) {
+    GGML_ASSERT(ggml_is_scalar(d));
+    GGML_ASSERT(ggml_are_same_shape(a, b));
+    GGML_ASSERT(ggml_are_same_shape(a, c));
+    GGML_ASSERT(c->type == GGML_TYPE_F32);
+
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
+
+    result->op     = GGML_OP_CROSS_ENTROPY_LOSS_MASKED_BACK;
+    result->src[0] = d;
+    result->src[1] = a;
+    result->src[2] = b;
+    result->src[3] = c;
 
     return result;
 }
@@ -6224,11 +6368,12 @@ static void ggml_acc_or_set(
         const  size_t         offset) {
     struct ggml_tensor * src = cgraph->visited_hash_set.keys[isrc];
     GGML_ASSERT(src);
+    struct ggml_tensor * tensor_cont = ggml_is_contiguous(tensor) ? tensor : ggml_cont(ctx, tensor);
     if (cgraph->grads[isrc]) {
-        cgraph->grads[isrc] = ggml_acc_impl(ctx, cgraph->grads[isrc], tensor, nb1, nb2, nb3, offset, cgraph->grad_accs[isrc]);
+        cgraph->grads[isrc] = ggml_acc_impl(ctx, cgraph->grads[isrc], tensor_cont, nb1, nb2, nb3, offset, cgraph->grad_accs[isrc]);
     } else {
         struct ggml_tensor * a_zero = ggml_scale(ctx, src, 0.0f); // FIXME this is going to produce NaN if a contains inf/NaN
-        cgraph->grads[isrc] = ggml_acc_impl(ctx, a_zero, tensor, nb1, nb2, nb3, offset, false);
+        cgraph->grads[isrc] = ggml_acc_impl(ctx, a_zero, tensor_cont, nb1, nb2, nb3, offset, false);
     }
     ggml_format_name(cgraph->grads[isrc], "grad for %s", cgraph->visited_hash_set.keys[isrc]->name);
     ggml_build_forward_expand(cgraph, cgraph->grads[isrc]);
@@ -6721,6 +6866,13 @@ static void ggml_compute_backward(
             }
             GGML_ASSERT(!src1_needs_grads && "backward pass for labels not implemented");
         } break;
+        case GGML_OP_CROSS_ENTROPY_LOSS_MASKED: {
+            if (src0_needs_grads) {
+                struct ggml_tensor * mask_tensor = tensor->src[2];
+                ggml_add_or_set(ctx, cgraph, isrc0, ggml_cross_entropy_loss_masked_back(ctx, src0, src1, mask_tensor, grad));
+            }
+            GGML_ASSERT(!src1_needs_grads && "backward pass for labels not implemented");
+        } break;
         case GGML_OP_GLU: {
             switch (ggml_get_glu_op(tensor)) {
                 case GGML_GLU_OP_SWIGLU: {
@@ -6730,6 +6882,16 @@ static void ggml_compute_backward(
                     }
                     if (src1_needs_grads) {
                         ggml_add_or_set(ctx, cgraph, isrc1, ggml_mul(ctx, ggml_silu(ctx, src0), grad));
+                    }
+                } break;
+                case GGML_GLU_OP_GEGLU: {
+                    if (src0_needs_grads) {
+                        GGML_ASSERT(src1 && "backward pass only implemented for split geglu");
+                        struct ggml_tensor * grad_mul_src1 = ggml_mul(ctx, grad, src1);
+                        ggml_add_or_set(ctx, cgraph, isrc0, ggml_geglu_back(ctx, grad_mul_src1, src0));
+                    }
+                    if (src1_needs_grads) {
+                        ggml_add_or_set(ctx, cgraph, isrc1, ggml_mul(ctx, grad, ggml_gelu(ctx, src0)));
                     }
                 } break;
                 default: {
@@ -6910,6 +7072,10 @@ void ggml_build_backward_expand(
             case GGML_OP_GET_ROWS:      // row indices not differentiable
             case GGML_OP_GET_ROWS_BACK: // same as for GET_ROWS
             case GGML_OP_ROPE:          // positions not differentiable
+                ignore_src[1] = true;
+                break;
+            case GGML_OP_SET_ROWS:
+                ignore_src[0] = true;
                 ignore_src[1] = true;
                 break;
 
@@ -7589,6 +7755,7 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_Q5_0:    result = quantize_q5_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q5_1:    result = quantize_q5_1(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q8_0:    result = quantize_q8_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q8_1:    result = quantize_q8_1(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_MXFP4:   result = quantize_mxfp4(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q2_K:    result = quantize_q2_K(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q3_K:    result = quantize_q3_K(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;

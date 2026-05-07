@@ -488,10 +488,12 @@ extern "C" {
         GGML_OP_MEAN,
         GGML_OP_ARGMAX,
         GGML_OP_COUNT_EQUAL,
+        GGML_OP_COUNT_EQUAL_MASKED,
         GGML_OP_REPEAT,
         GGML_OP_REPEAT_BACK,
         GGML_OP_CONCAT,
         GGML_OP_SILU_BACK,
+        GGML_OP_GEGLU_BACK,
         GGML_OP_NORM, // normalize
         GGML_OP_RMS_NORM,
         GGML_OP_RMS_NORM_BACK,
@@ -555,6 +557,7 @@ extern "C" {
         GGML_OP_RWKV_WKV6,
         GGML_OP_GATED_LINEAR_ATTN,
         GGML_OP_RWKV_WKV7,
+        GGML_OP_DELTA_NET_AR,
         GGML_OP_SOLVE_TRI,
 
         GGML_OP_UNARY,
@@ -567,6 +570,8 @@ extern "C" {
 
         GGML_OP_CROSS_ENTROPY_LOSS,
         GGML_OP_CROSS_ENTROPY_LOSS_BACK,
+        GGML_OP_CROSS_ENTROPY_LOSS_MASKED,
+        GGML_OP_CROSS_ENTROPY_LOSS_MASKED_BACK,
         GGML_OP_OPT_STEP_ADAMW,
         GGML_OP_OPT_STEP_SGD,
 
@@ -1040,6 +1045,13 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
 
+    // count number of equal elements in a and b, but only where mask=1
+    GGML_API struct ggml_tensor * ggml_count_equal_masked(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,  // predictions
+            struct ggml_tensor  * b,  // targets
+            struct ggml_tensor  * c); // mask (1 for positions to count, 0 to skip)
+
     // if a is the same shape as b, and a is not parameter, return a
     // otherwise, return a new tensor: repeat(a) to fit in b
     GGML_API struct ggml_tensor * ggml_repeat(
@@ -1179,6 +1191,10 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
 
+   GGML_API struct ggml_tensor * ggml_geglu_back(
+           struct ggml_context * ctx,
+           struct ggml_tensor  * grad,
+           struct ggml_tensor  * g);
     // hardswish(x) = x * relu6(x + 3) / 6
     GGML_API struct ggml_tensor * ggml_hardswish(
             struct ggml_context * ctx,
@@ -2442,6 +2458,29 @@ extern "C" {
             struct ggml_tensor  * b,
             struct ggml_tensor  * state);
 
+    // Gated DeltaNet autoregressive (n_tokens == 1) recurrence.
+    //
+    //   s_g[j, i] = s_in[j, i] * exp(g_factor(i))
+    //   sk[j]     = sum_i s_g[j, i] * k[i]
+    //   d[j]      = beta * (v[j] - sk[j])
+    //   kq        = sum_b k[b] * q[b]                // no gate
+    //   o[j]      = sum_i s_g[j, i] * q[i] + d[j] * kq
+    //   s_out[j,i]= s_g[j, i] + d[j] * k[i]
+    //
+    // Inputs:  s [S, S, H, N], q [S, 1, H, N], k [S, 1, H, N], v [S, 1, H, N],
+    //          g [g_ne0, 1, H, N] with g_ne0 in {1, S}, beta [1, 1, H, N].
+    // Result:  packed 1D tensor of length (S + S*S)*H*N. The first S*H*N
+    //          elements are o (laid out as [S, 1, H, N]); the remaining
+    //          S*S*H*N are s_out (laid out as [S, S, H, N]).
+    GGML_API struct ggml_tensor * ggml_delta_net_ar(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * s,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * g,
+            struct ggml_tensor  * beta);
+
     /* Solves a specific equation of the form Ax=B, where A is a triangular matrix
     *  without zeroes on the diagonal (i.e. invertible).
     *  B can have any number of columns, but must have the same number of rows as A
@@ -2556,6 +2595,19 @@ extern "C" {
             struct ggml_tensor  * a,  // logits
             struct ggml_tensor  * b,  // labels
             struct ggml_tensor  * c); // gradients of cross_entropy_loss result
+
+    // Masked cross-entropy loss for instruction fine-tuning (assistant-only loss)
+    GGML_API struct ggml_tensor * ggml_cross_entropy_loss_masked(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,  // logits
+            struct ggml_tensor  * b,  // labels  
+            struct ggml_tensor  * c); // mask (1 for assistant tokens, 0 for masked)
+    GGML_API struct ggml_tensor * ggml_cross_entropy_loss_masked_back(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,  // logits
+            struct ggml_tensor  * b,  // labels
+            struct ggml_tensor  * c,  // mask
+            struct ggml_tensor  * d); // gradients of cross_entropy_loss result
 
     // AdamW optimizer step
     // Paper: https://arxiv.org/pdf/1711.05101v3.pdf

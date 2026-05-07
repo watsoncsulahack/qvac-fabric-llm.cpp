@@ -1,3 +1,7 @@
+#if defined(DATA_A_TQ2_0)
+#include "tq_utils.glsl"
+#endif
+
 void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uint idx_m, const uint block, const uint end_k) {
 #if defined(DATA_A_F32) || defined(DATA_A_F16)
 #if LOAD_VEC_A == 8
@@ -54,8 +58,25 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
 
             const float d = float(data_a_packed16[ib].d);
             const uint vui = uint(data_a_packed16[ib].qs[2*iqs]) | (uint(data_a_packed16[ib].qs[2*iqs + 1]) << 16);
+
+#if defined(ADRENO)
+            const vec4 v0 = (vec4(
+                float((vui >> 0)  & 0xF),
+                float((vui >> 8)  & 0xF),
+                float((vui >> 16) & 0xF),
+                float((vui >> 24) & 0xF)
+            ) - 8.0) * d;
+
+            const vec4 v1 = (vec4(
+                float((vui >> 4)  & 0xF),
+                float((vui >> 12) & 0xF),
+                float((vui >> 20) & 0xF),
+                float((vui >> 28) & 0xF)
+            ) - 8.0) * d;
+#else
             const vec4 v0 = (vec4(unpack8(vui & 0x0F0F0F0F)) - 8.0f) * d;
             const vec4 v1 = (vec4(unpack8((vui >> 4) & 0x0F0F0F0F)) - 8.0f) * d;
+#endif
 
             buf_a[buf_idx    ] = FLOAT_TYPE_VEC2(v0.xy);
             buf_a[buf_idx + 1] = FLOAT_TYPE_VEC2(v0.zw);
@@ -70,8 +91,23 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
 
             const vec2 dm = vec2(data_a_packed32[ib].dm);
             const uint vui = data_a_packed32[ib].qs[iqs];
+#if defined(ADRENO)
+            const vec4 v0 = vec4(
+                float((vui >> 0)  & 0xF),
+                float((vui >> 8)  & 0xF),
+                float((vui >> 16) & 0xF),
+                float((vui >> 24) & 0xF)
+            ) * dm.x + dm.y;
+            const vec4 v1 = vec4(
+                float((vui >> 4)  & 0xF),
+                float((vui >> 12) & 0xF),
+                float((vui >> 20) & 0xF),
+                float((vui >> 28) & 0xF)
+            ) * dm.x + dm.y;
+#else
             const vec4 v0 = vec4(unpack8(vui & 0x0F0F0F0F)) * dm.x + dm.y;
             const vec4 v1 = vec4(unpack8((vui >> 4) & 0x0F0F0F0F)) * dm.x + dm.y;
+#endif
 
             buf_a[buf_idx     ] = FLOAT_TYPE_VEC2(v0.xy);
             buf_a[buf_idx + 1 ] = FLOAT_TYPE_VEC2(v0.zw);
@@ -123,13 +159,102 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
             const uint ib = idx / 8;
             const uint iqs = idx & 0x07;
 
+#if defined(ADRENO)
+            const float d = float(data_a[ib].d);
+            const vec4 v = vec4(
+                int(data_a[ib].qs[4*iqs]),
+                int(data_a[ib].qs[4*iqs + 1]),
+                int(data_a[ib].qs[4*iqs + 2]),
+                int(data_a[ib].qs[4*iqs + 3])
+            ) * d;
+#else
             const float d = float(data_a_packed16[ib].d);
             const i8vec2 v0 = unpack8(int32_t(data_a_packed16[ib].qs[2*iqs])).xy; // vec4 used due to #12147
             const i8vec2 v1 = unpack8(int32_t(data_a_packed16[ib].qs[2*iqs + 1])).xy;
             const vec4 v = vec4(v0.x, v0.y, v1.x, v1.y) * d;
+#endif
 
             buf_a[buf_idx    ] = FLOAT_TYPE_VEC2(v.xy);
             buf_a[buf_idx + 1] = FLOAT_TYPE_VEC2(v.zw);
+#elif defined(DATA_A_TQ2_0)
+            const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+            const uint buf_idx = col * SHMEM_STRIDE + row * LOAD_VEC_A / 2;
+
+            const uint ib = idx / 128;                 // 2 values per idx
+            const uint iqs = idx % 128;                // 0..127
+
+            const float d = float(data_a[ib].d);
+
+            const uint e0 = 2 * iqs;
+            const uint e1 = e0 + 1;
+
+            const float v0 = d * float(tq2_dequantize(ib, e0));
+            const float v1 = d * float(tq2_dequantize(ib, e1));
+
+            buf_a[buf_idx] = FLOAT_TYPE_VEC2(v0, v1);
+#elif defined(DATA_A_TQ1_0)
+            const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+            const uint buf_idx = col * SHMEM_STRIDE + row * LOAD_VEC_A / 2;
+
+            const uint ib = idx / 128;
+            const uint iqs = idx % 128;
+
+            const float d = float(data_a[ib].d);
+
+            const uint pow3[6] = uint[6](1u, 3u, 9u, 27u, 81u, 243u);
+
+            const uint e0 = 2u * iqs;
+            const uint e1 = e0 + 1u;
+
+            float v0;
+            if (e0 < 160u) {
+                const uint n0 = e0 / 32u;
+                const uint m0 = e0 % 32u;
+                const uint q0 = uint(data_a[ib].qs[m0]);
+                const uint xi0 = (((q0 * pow3[n0]) & 255u) * 3u) >> 8;
+                v0 = float(int(xi0) - 1);
+            } else if (e0 < 240u) {
+                const uint ee0 = e0 - 160u;
+                const uint n0 = ee0 / 16u;
+                const uint m0 = ee0 % 16u;
+                const uint q0 = uint(data_a[ib].qs[32u + m0]);
+                const uint xi0 = (((q0 * pow3[n0]) & 255u) * 3u) >> 8;
+                v0 = float(int(xi0) - 1);
+            } else {
+                const uint ee0 = e0 - 240u;
+                const uint n0 = ee0 / (QUANT_K / 64u);
+                const uint j0 = ee0 % (QUANT_K / 64u);
+                const uint q0 = uint(data_a[ib].qh[j0]);
+                const uint xi0 = (((q0 * pow3[n0]) & 255u) * 3u) >> 8;
+                v0 = float(int(xi0) - 1);
+            }
+
+            float v1;
+            if (e1 < 160u) {
+                const uint n1 = e1 / 32u;
+                const uint m1 = e1 % 32u;
+                const uint q1 = uint(data_a[ib].qs[m1]);
+                const uint xi1 = (((q1 * pow3[n1]) & 255u) * 3u) >> 8;
+                v1 = float(int(xi1) - 1);
+            } else if (e1 < 240u) {
+                const uint ee1 = e1 - 160u;
+                const uint n1 = ee1 / 16u;
+                const uint m1 = ee1 % 16u;
+                const uint q1 = uint(data_a[ib].qs[32u + m1]);
+                const uint xi1 = (((q1 * pow3[n1]) & 255u) * 3u) >> 8;
+                v1 = float(int(xi1) - 1);
+            } else {
+                const uint ee1 = e1 - 240u;
+                const uint n1 = ee1 / (QUANT_K / 64u);
+                const uint j1 = ee1 % (QUANT_K / 64u);
+                const uint q1 = uint(data_a[ib].qh[j1]);
+                const uint xi1 = (((q1 * pow3[n1]) & 255u) * 3u) >> 8;
+                v1 = float(int(xi1) - 1);
+            }
+
+            const vec2 v = d * vec2(v0, v1);
+
+            buf_a[buf_idx    ] = FLOAT_TYPE_VEC2(v.xy);
 #elif defined(DATA_A_Q2_K)
             const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
             const uint buf_idx = col * SHMEM_STRIDE + row * LOAD_VEC_A / 2;

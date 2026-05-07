@@ -226,6 +226,9 @@ set_tests_properties(test-download-model PROPERTIES FIXTURES_SETUP test-download
 llama_build_and_test(test-thread-safety.cpp ARGS -m "${MODEL_DEST}" -ngl 99 -p "The meaning of life is" -n 128 -c 256 -ub 32 -np 4 -t 2)
 set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-download-model)
 
+
+llama_build(test-multi-instance-repro.cpp)
+
 llama_build_and_test(test-arg-parser.cpp)
 
 if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
@@ -235,12 +238,16 @@ endif()
 llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
 
-llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
-llama_build_and_test(test-autorelease.cpp       LABEL "model")
-llama_build_and_test(test-backend-sampler.cpp   LABEL "model")
+llama_build_and_test(test-model-load-cancel.cpp       LABEL "model")
+llama_build_and_test(test-model-load-disk.cpp         LABEL "model")
+llama_build_and_test(test-model-load-memory.cpp       LABEL "model")
+target_include_directories(test-model-load-memory PRIVATE ${PROJECT_SOURCE_DIR}/common_test)
+llama_build_and_test(test-model-load-memory-split.cpp LABEL "model")
+target_include_directories(test-model-load-memory-split PRIVATE ${PROJECT_SOURCE_DIR}/common_test)
+llama_build_and_test(test-autorelease.cpp             LABEL "model")
+llama_build_and_test(test-backend-sampler.cpp         LABEL "model")
 
 # Test for state restore with fragmented KV cache
-# Requires a model, uses same args pattern as test-thread-safety
 llama_build_and_test(test-state-restore-fragmented.cpp LABEL "model" ARGS -m "${MODEL_DEST}")
 set_tests_properties(test-state-restore-fragmented PROPERTIES FIXTURES_REQUIRED test-download-model)
 
@@ -253,9 +260,11 @@ if (NOT GGML_BACKEND_DL)
 endif()
 
 # libmtmd
-set(LLAMA_TEST_NAME test-mtmd-c-api)
-llama_build_and_test(test-mtmd-c-api.c)
-target_link_libraries(${LLAMA_TEST_NAME} PRIVATE mtmd)
+if (LLAMA_MTMD)
+    set(LLAMA_TEST_NAME test-mtmd-c-api)
+    llama_build_and_test(test-mtmd-c-api.c)
+    target_link_libraries(${LLAMA_TEST_NAME} PRIVATE mtmd)
+endif()
 
 # GGUF model data fetcher library for tests that need real model metadata
 # Only compile when cpp-httplib has SSL support (CPPHTTPLIB_OPENSSL_SUPPORT)

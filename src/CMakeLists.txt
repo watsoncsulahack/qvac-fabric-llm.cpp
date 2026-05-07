@@ -7,7 +7,6 @@ llama_add_compile_flags()
 # llama
 
 add_library(llama
-            ../include/llama.h
             llama.cpp
             llama-adapter.cpp
             llama-arch.cpp
@@ -22,11 +21,14 @@ add_library(llama
             llama-io.cpp
             llama-kv-cache.cpp
             llama-kv-cache-iswa.cpp
+            llama-lora-training.cpp
             llama-memory.cpp
             llama-memory-hybrid.cpp
             llama-memory-hybrid-iswa.cpp
             llama-memory-recurrent.cpp
             llama-mmap.cpp
+            llama-model-load-input.cpp
+            llama-model-load.cpp
             llama-model-loader.cpp
             llama-model-saver.cpp
             llama-model.cpp
@@ -73,6 +75,7 @@ add_library(llama
             models/gemma2-iswa.cpp
             models/gemma3.cpp
             models/gemma3n-iswa.cpp
+            models/gemma4-iswa.cpp
             models/glm4-moe.cpp
             models/glm4.cpp
             models/gpt2.cpp
@@ -157,7 +160,12 @@ set_target_properties(llama PROPERTIES
 )
 
 target_include_directories(llama PRIVATE .)
-target_include_directories(llama PUBLIC ../include)
+target_include_directories(
+  llama
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/llama>)
+
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml)

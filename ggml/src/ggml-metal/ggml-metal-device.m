@@ -643,6 +643,67 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
             dev->props.has_simdgroup_reduction |= [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
 
             dev->props.has_simdgroup_mm = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
+
+            // Paravirtualized GPUs on Apple Silicon (e.g. GitHub Actions macos runners)
+            // report MTLGPUFamilyApple5 even though the underlying M-series hardware
+            // supports simdgroup intrinsics. Probe the Metal compiler/linker to see
+            // what actually works, and re-enable accordingly.
+            {
+                if (!dev->props.has_simdgroup_reduction) {
+                    const char * src_simd_red =
+                        "#include <metal_stdlib>\n"
+                        "using namespace metal;\n"
+                        "kernel void probe_simd_red(\n"
+                        "    device const float * src [[buffer(0)]],\n"
+                        "    device       float * dst [[buffer(1)]],\n"
+                        "    uint tpig [[thread_position_in_grid]],\n"
+                        "    uint tiisg [[thread_index_in_simdgroup]]) {\n"
+                        "    float v = src[tpig];\n"
+                        "    v = simd_sum(v);\n"
+                        "    v = simd_max(v);\n"
+                        "    if (tiisg == 0) { dst[tpig / 32] = v; }\n"
+                        "}\n";
+                    GGML_LOG_INFO("%s: probing simdgroup reduction support\n", __func__);
+                    ggml_metal_library_t lib = ggml_metal_library_init_from_source(dev, src_simd_red, false);
+                    if (lib != NULL) {
+                        struct ggml_metal_pipeline_with_params ppl = ggml_metal_library_compile_pipeline(lib, "probe_simd_red", "probe_simd_red", nil);
+                        if (ppl.pipeline) {
+                            GGML_LOG_INFO("%s: simdgroup reduction probe succeeded - enabling\n", __func__);
+                            dev->props.has_simdgroup_reduction = true;
+                        }
+                        ggml_metal_library_free(lib);
+                    }
+                }
+                if (!dev->props.has_simdgroup_mm) {
+                    const char * src_simd_mm =
+                        "#include <metal_stdlib>\n"
+                        "using namespace metal;\n"
+                        "kernel void probe_simd_mm(\n"
+                        "    device const half  * a [[buffer(0)]],\n"
+                        "    device const half  * b [[buffer(1)]],\n"
+                        "    device       float * c [[buffer(2)]],\n"
+                        "    uint sgitg [[simdgroup_index_in_threadgroup]]) {\n"
+                        "    simdgroup_half8x8  ma;\n"
+                        "    simdgroup_half8x8  mb;\n"
+                        "    simdgroup_float8x8 mc = make_filled_simdgroup_matrix<float, 8>(0.f);\n"
+                        "    simdgroup_load(ma, a, 8);\n"
+                        "    simdgroup_load(mb, b, 8);\n"
+                        "    simdgroup_multiply_accumulate(mc, ma, mb, mc);\n"
+                        "    simdgroup_store(mc, c, 8);\n"
+                        "    (void) sgitg;\n"
+                        "}\n";
+                    GGML_LOG_INFO("%s: probing simdgroup matrix-mul support\n", __func__);
+                    ggml_metal_library_t lib = ggml_metal_library_init_from_source(dev, src_simd_mm, false);
+                    if (lib != NULL) {
+                        struct ggml_metal_pipeline_with_params ppl = ggml_metal_library_compile_pipeline(lib, "probe_simd_mm", "probe_simd_mm", nil);
+                        if (ppl.pipeline) {
+                            GGML_LOG_INFO("%s: simdgroup matrix-mul probe succeeded - enabling\n", __func__);
+                            dev->props.has_simdgroup_mm = true;
+                        }
+                        ggml_metal_library_free(lib);
+                    }
+                }
+            }
             dev->props.has_unified_memory = dev->mtl_device.hasUnifiedMemory;
 
             dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
@@ -998,6 +1059,10 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
     const bool has_simdgroup_reduction = dev->props.has_simdgroup_reduction;
     const bool has_bfloat              = dev->props.has_bfloat;
 
+    if (!has_simdgroup_reduction) {
+        return false;
+    }
+
     if (!has_bfloat) {
         if (op->type == GGML_TYPE_BF16) {
             return false;
@@ -1069,6 +1134,31 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_ADD_ID:
         case GGML_OP_ACC:
             return ggml_is_contiguous_rows(op->src[0]) && ggml_is_contiguous_rows(op->src[1]) && op->src[0]->type == GGML_TYPE_F32;
+        case GGML_OP_OUT_PROD:
+            if (op->type != GGML_TYPE_F32) {
+                return false;
+            }
+            {
+                const enum ggml_type src0_type = op->src[0]->type;
+                const enum ggml_type src1_type = op->src[1]->type;
+
+                if (src0_type == GGML_TYPE_F16 && src1_type == GGML_TYPE_F32) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_F32 && (src1_type == GGML_TYPE_F32 || src1_type == GGML_TYPE_F16)) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_F16 && src1_type == GGML_TYPE_F16) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_Q8_0 && (src1_type == GGML_TYPE_F32 || src1_type == GGML_TYPE_F16)) {
+                    return true;
+                }
+                if (src0_type == GGML_TYPE_Q4_0 && (src1_type == GGML_TYPE_F32 || src1_type == GGML_TYPE_F16)) {
+                    return true;
+                }
+            }
+            return false;
         case GGML_OP_REPEAT:
         case GGML_OP_CONV_TRANSPOSE_1D:
             return true;
@@ -1081,6 +1171,16 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             return has_simdgroup_reduction && ggml_is_contiguous(op->src[0]);
         case GGML_OP_TRI:
             return ggml_is_contiguous_rows(op->src[0]);
+        case GGML_OP_SILU_BACK:
+            return op->type == GGML_TYPE_F32 &&
+                   op->src[0] != NULL && op->src[1] != NULL &&
+                   op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   ggml_is_contiguous_1(op->src[0]) &&
+                   ggml_is_contiguous_1(op->src[1]) &&
+                   ggml_is_contiguous_1(op) &&
+                   ggml_are_same_shape(op, op->src[0]) &&
+                   ggml_are_same_shape(op, op->src[1]);
         case GGML_OP_SUM_ROWS:
         case GGML_OP_CUMSUM:
         case GGML_OP_MEAN:
@@ -1088,6 +1188,29 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_GROUP_NORM:
         case GGML_OP_L2_NORM:
             return has_simdgroup_reduction && ggml_is_contiguous_rows(op->src[0]);
+        case GGML_OP_SOFT_MAX_BACK:
+            {
+                if (!has_simdgroup_reduction ||
+                    op->type != GGML_TYPE_F32 ||
+                    op->src[0] == NULL || op->src[1] == NULL ||
+                    op->src[0]->type != GGML_TYPE_F32 ||
+                    op->src[1]->type != GGML_TYPE_F32 ||
+                    !ggml_is_contiguous_1(op->src[0]) ||
+                    !ggml_is_contiguous_1(op->src[1]) ||
+                    !ggml_is_contiguous_1(op) ||
+                    !ggml_are_same_shape(op, op->src[0]) ||
+                    !ggml_are_same_shape(op, op->src[1])) {
+                    return false;
+                }
+
+                float max_bias = 0.0f;
+                memcpy(&max_bias, ((const float *) op->op_params) + 1, sizeof(float));
+                if (max_bias != 0.0f) {
+                    return false;
+                }
+
+                return true;
+            }
         case GGML_OP_COUNT_EQUAL:
             return has_simdgroup_reduction &&
                 op->src[0]->type == GGML_TYPE_I32 &&
@@ -1098,6 +1221,18 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_NORM:
         case GGML_OP_RMS_NORM:
             return has_simdgroup_reduction && (ggml_is_contiguous_rows(op->src[0]));
+        case GGML_OP_RMS_NORM_BACK:
+            return has_simdgroup_reduction &&
+                   op->type == GGML_TYPE_F32 &&
+                   op->src[0] != NULL && op->src[1] != NULL &&
+                   op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   op->ne[0] % 4 == 0 &&
+                   ggml_is_contiguous_1(op->src[0]) &&
+                   ggml_is_contiguous_1(op->src[1]) &&
+                   ggml_is_contiguous_1(op) &&
+                   ggml_are_same_shape(op, op->src[0]) &&
+                   ggml_are_same_shape(op, op->src[1]);
         case GGML_OP_ROPE:
             return true;
         case GGML_OP_IM2COL:
@@ -1158,7 +1293,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
-            return has_simdgroup_reduction;
+            return op->src[0]->type != GGML_TYPE_TQ1_0 && has_simdgroup_reduction;
         case GGML_OP_SET:
         case GGML_OP_CPY:
         case GGML_OP_DUP:
@@ -1216,7 +1351,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 };
             }
         case GGML_OP_GET_ROWS:
-            return true;
+            return op->src[0]->type != GGML_TYPE_TQ1_0;
         case GGML_OP_SET_ROWS:
             {
                 if (op->src[0]->type != GGML_TYPE_F32) {

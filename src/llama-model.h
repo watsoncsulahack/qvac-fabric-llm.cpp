@@ -7,12 +7,14 @@
 #include "llama-memory.h"
 #include "llama-vocab.h"
 
-#include <map>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <map>
 
 struct llama_cparams;
 struct llama_ubatch;
@@ -54,6 +56,7 @@ enum llm_type {
     LLM_TYPE_0_3B,
     LLM_TYPE_0_5B,
     LLM_TYPE_0_6B,
+    LLM_TYPE_0_8B,
     LLM_TYPE_1B,
     LLM_TYPE_1_2B,
     LLM_TYPE_1_3B,
@@ -125,12 +128,14 @@ enum llm_type {
     LLM_TYPE_100B_A6B,
     LLM_TYPE_102B_A12B, // Solar-Open
     LLM_TYPE_106B_A12B, // GLM-4.5-Air
+    LLM_TYPE_122B_A10B, // Qwen3.5
     LLM_TYPE_196B_A11B, // Step3.5-Flash
     LLM_TYPE_230B_A10B, // Minimax M2
     LLM_TYPE_235B_A22B,
     LLM_TYPE_300B_A47B, // Ernie MoE big
     LLM_TYPE_310B_A15B, // /MiMo-V2-Flash
     LLM_TYPE_355B_A32B, // GLM-4.5
+    LLM_TYPE_397B_A17B, // Qwen3.5
     LLM_TYPE_744B_A40B, // GLM-5
     LLM_TYPE_E2B,
     LLM_TYPE_E4B,
@@ -266,6 +271,9 @@ struct llama_layer {
     struct ggml_tensor * ffn_norm         = nullptr;
     struct ggml_tensor * ffn_norm_b       = nullptr;
     struct ggml_tensor * ffn_post_norm    = nullptr;
+    struct ggml_tensor * ffn_post_norm_1  = nullptr; // gemma4
+    struct ggml_tensor * ffn_post_norm_2  = nullptr; // gemma4
+    struct ggml_tensor * ffn_pre_norm_2   = nullptr; // gemma4
     struct ggml_tensor * layer_out_norm   = nullptr;
     struct ggml_tensor * layer_out_norm_b = nullptr;
     struct ggml_tensor * ffn_norm_exps    = nullptr;
@@ -281,6 +289,7 @@ struct llama_layer {
 
     // ff MoE
     struct ggml_tensor * ffn_gate_inp      = nullptr;
+    struct ggml_tensor * ffn_gate_inp_s    = nullptr; // gemma4
     struct ggml_tensor * ffn_gate_exps     = nullptr;
     struct ggml_tensor * ffn_down_exps     = nullptr;
     struct ggml_tensor * ffn_up_exps       = nullptr;
@@ -383,6 +392,9 @@ struct llama_layer {
     struct ggml_tensor * rope_short = nullptr;
     struct ggml_tensor * rope_freqs = nullptr;
 
+    // gemma4 layer output scale
+    struct ggml_tensor * out_scale = nullptr;
+
     // bitnet scale
     struct ggml_tensor * wq_scale       = nullptr;
     struct ggml_tensor * wk_scale       = nullptr;
@@ -447,6 +459,13 @@ struct llama_layer {
     struct llama_layer_shortconv shortconv;
 
     struct llama_layer_nextn nextn;
+};
+
+// define a comparator for the buft -> ctx map to ensure that the order is well-defined:
+struct ggml_backend_buft_comparator {
+    bool operator()(const ggml_backend_buffer_type_t & lhs, const ggml_backend_buffer_type_t & rhs) const {
+        return strcmp(ggml_backend_buft_name(lhs), ggml_backend_buft_name(rhs)) < 0;
+    }
 };
 
 struct llama_model {
@@ -516,6 +535,19 @@ struct llama_model {
 
     explicit llama_model(const struct llama_model_params & params);
     ~llama_model();
+
+    /// @brief Create backend buffers for all tensors
+    bool create_backend_buffers(std::size_t                                                  size_data,
+                                std::map<ggml_backend_buffer_type_t, ggml_context_ptr, ggml_backend_buft_comparator> & ctx_map,
+                                llama_model_loader & ml, bool use_mmap_buffer, bool use_mlock, int32_t n_gpu_layers,
+                                bool do_print_backend_buffers_info = true);
+
+    /// @brief Create backend buffers for tensors on a split file idenfified by `idx`. Removes the split from the map.
+    bool create_split_backend_buffers(
+        uint16_t idx, std::map<std::pair<ggml_backend_buffer_type_t, uint16_t>, ggml_context_ptr> & ctx_split_map,
+        llama_model_loader & ml, bool use_mmap_buffer, bool use_mlock, int32_t n_gpu_layers);
+
+    void print_backend_buffers_info(int32_t n_gpu_layers);
 
     void load_stats  (llama_model_loader & ml);
     void load_arch   (llama_model_loader & ml);
