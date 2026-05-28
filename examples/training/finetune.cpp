@@ -4,6 +4,7 @@
 #include "llama.h"
 #include "ggml-backend.h"
 
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -81,8 +82,12 @@ static bool training_supports_out_prod_f16(const common_params & params) {
 }
 
 int main(int argc, char ** argv) {
+    std::setlocale(LC_NUMERIC, "C");
+
     common_params params;
     params.escape = false;
+
+    common_init();
 
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_FINETUNE)) {
         return 1;
@@ -105,7 +110,6 @@ int main(int argc, char ** argv) {
         }
     }
 
-    common_init();
     llama_backend_init();
     llama_numa_init(params.numa);
     // load the model and apply lora adapter, if any

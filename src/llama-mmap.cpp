@@ -86,6 +86,14 @@ struct llama_file_disk::impl {
         seek(0, SEEK_SET);
     }
 
+    impl(FILE * file) : owns_fp(false) {
+        fp = file;
+        fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
+        seek(0, SEEK_END);
+        size = tell();
+        seek(0, SEEK_SET);
+    }
+
     size_t tell() const {
         LARGE_INTEGER li;
         li.QuadPart = 0;
@@ -159,7 +167,7 @@ struct llama_file_disk::impl {
     }
 
     ~impl() {
-        if (fp) {
+        if (fp && owns_fp) {
             std::fclose(fp);
         }
     }
@@ -204,6 +212,13 @@ struct llama_file_disk::impl {
         if (fp == NULL) {
             throw std::runtime_error(format("failed to open %s: %s", fname.c_str(), strerror(errno)));
         }
+        seek(0, SEEK_END);
+        size = tell();
+        seek(0, SEEK_SET);
+    }
+
+    impl(FILE * file) : fname("(file*)"), owns_fp(false) {
+        fp = file;
         seek(0, SEEK_END);
         size = tell();
         seek(0, SEEK_SET);
@@ -353,7 +368,7 @@ struct llama_file_disk::impl {
     ~impl() {
         if (fd != -1) {
             close(fd);
-        } else {
+        } else if (owns_fp) {
             std::fclose(fp);
         }
     }
@@ -369,10 +384,12 @@ struct llama_file_disk::impl {
 
     FILE * fp{};
     size_t size{};
+    bool owns_fp = true;
 };
 
 llama_file_disk::llama_file_disk(const char * fname, const char * mode, const bool use_direct_io) :
     pimpl(std::make_unique<impl>(fname, mode, use_direct_io)) {}
+llama_file_disk::llama_file_disk(FILE * file) : pimpl(std::make_unique<impl>(file)) {}
 llama_file_disk::~llama_file_disk() = default;
 
 size_t llama_file_disk::tell() const { return pimpl->tell(); }
@@ -397,16 +414,20 @@ int llama_file_disk::file_id() const {
 }
 
 void llama_file_disk::seek(size_t offset, int whence) const { pimpl->seek(offset, whence); }
-void llama_file_disk::read_raw(void * ptr, size_t len) const { pimpl->read_raw(ptr, len); }
+void llama_file_disk::read_raw(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
 #ifdef _WIN32
-void llama_file_disk::read_raw_unsafe(void * ptr, size_t len) const { pimpl->read_raw(ptr, len); }
-void llama_file_disk::read_aligned_chunk(void * dest, size_t size) const { pimpl->read_raw(dest, size); }
+void llama_file_disk::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
 #else
-void llama_file_disk::read_raw_unsafe(void * ptr, size_t len) const { pimpl->read_raw_unsafe(ptr, len); }
-void llama_file_disk::read_aligned_chunk(void * dest, size_t size) const { pimpl->read_aligned_chunk(dest, size); }
+void llama_file_disk::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw_unsafe(ptr, len); }
 #endif
 
-uint32_t llama_file_disk::read_u32() const { return pimpl->read_u32(); }
+#ifdef _WIN32
+void llama_file_disk::read_aligned_chunk(void * dest, size_t size) { pimpl->read_raw(dest, size); }
+#else
+void llama_file_disk::read_aligned_chunk(void * dest, size_t size) { pimpl->read_aligned_chunk(dest, size); }
+#endif
+
+uint32_t llama_file_disk::read_u32() { return pimpl->read_u32(); }
 
 void llama_file_disk::write_raw(const void * ptr, size_t len) const { pimpl->write_raw(ptr, len); }
 void llama_file_disk::write_u32(uint32_t val) const { pimpl->write_u32(val); }
@@ -444,14 +465,14 @@ template <bool Writable> void llama_file_buffer<Writable>::seek(size_t offset, i
     }
 }
 
-template <bool Writable> void llama_file_buffer<Writable>::read_raw(void * ptr, size_t len) const {
+template <bool Writable> void llama_file_buffer<Writable>::read_raw(void * ptr, size_t len) {
     auto bytes_read = streambuf->sgetn(static_cast<char *>(ptr), len);
     if (bytes_read != static_cast<std::streamsize>(len)) {
         throw std::runtime_error("read beyond end of buffer");
     }
 }
 
-template <bool Writable> uint32_t llama_file_buffer<Writable>::read_u32() const {
+template <bool Writable> uint32_t llama_file_buffer<Writable>::read_u32() {
     uint32_t val;
     read_raw(&val, sizeof(val));
     return val;

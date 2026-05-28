@@ -46,12 +46,14 @@ set(TARGET common)
 set(${TARGET}_HEADERS
   arg.h
   base64.hpp
-  chat-parser.h
+  chat-auto-parser.h
+  chat-peg-parser.h
   chat.h
   common.h
   console.h
   debug.h
   download.h
+  hf-cache.h
   http.h
   json-partial.h
   json-schema-to-grammar.h
@@ -61,36 +63,38 @@ set(${TARGET}_HEADERS
   ngram-mod.h
   peg-parser.h
   preset.h
+  reasoning-budget.h
   regex-partial.h
   sampling.h
   speculative.h
   unicode.h
+)
+
+set(${TARGET}_JINJA_HEADERS
+  jinja/caps.h
   jinja/lexer.h
   jinja/parser.h
   jinja/runtime.h
-  jinja/value.h
   jinja/string.h
-  jinja/caps.h
+  jinja/utils.h
+  jinja/value.h
 )
 
 list(TRANSFORM ${TARGET}_HEADERS PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
+list(TRANSFORM ${TARGET}_JINJA_HEADERS PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
 
 add_library(${TARGET} STATIC
     arg.cpp
-    chat-parser.cpp
-    chat-parser.h
-    chat-parser-xml-toolcall.h
-    chat-parser-xml-toolcall.cpp
+    chat-auto-parser-generator.cpp
+    chat-auto-parser-helpers.cpp
+    chat-diff-analyzer.cpp
     chat-peg-parser.cpp
-    chat-peg-parser.h
     chat.cpp
     common.cpp
     console.cpp
-    console.h
     debug.cpp
     download.cpp
-    download.h
-    http.h
+    hf-cache.cpp
     json-partial.cpp
     json-schema-to-grammar.cpp
     llguidance.cpp
@@ -101,6 +105,7 @@ add_library(${TARGET} STATIC
     peg-parser.cpp
     preset.cpp
     regex-partial.cpp
+    reasoning-budget.cpp
     sampling.cpp
     speculative.cpp
     unicode.cpp
@@ -111,9 +116,12 @@ add_library(${TARGET} STATIC
     jinja/string.cpp
     jinja/caps.cpp
     ${${TARGET}_HEADERS}
+    ${${TARGET}_JINJA_HEADERS}
     )
 
 set_target_properties(${TARGET} PROPERTIES PUBLIC_HEADER "${${TARGET}_HEADERS}")
+install(FILES ${${TARGET}_JINJA_HEADERS}
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/llama/common/jinja)
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)

@@ -555,8 +555,13 @@ ggml_metal_rsets_t ggml_metal_rsets_init(void) {
     res->lock = [[NSLock alloc] init];
     res->data = [[NSMutableArray alloc] init];
 
-    // by default keep the memory wired for 3 minutes
-    res->keep_alive_s = 3*60;
+    // Default to a 1-second heartbeat to emulate the pre-c41bde6fb behavior (no
+    // ongoing requestResidency re-issuance) on memory-constrained targets like
+    // iOS, where holding Metal buffers wired for minutes pushes the app past
+    // jetsam under workloads like the embed-llamacpp 4096-batch stress test.
+    // Set GGML_METAL_RESIDENCY_KEEP_ALIVE_S=180 to restore the upstream default
+    // when running interactive workloads on desktop where wired memory is free.
+    res->keep_alive_s = 1;
 
     const char * GGML_METAL_RESIDENCY_KEEP_ALIVE_S = getenv("GGML_METAL_RESIDENCY_KEEP_ALIVE_S");
     if (GGML_METAL_RESIDENCY_KEEP_ALIVE_S) {
@@ -564,7 +569,7 @@ ggml_metal_rsets_t ggml_metal_rsets_init(void) {
     }
 
     if (res->keep_alive_s <= 0) {
-        res->keep_alive_s = 3*60;
+        res->keep_alive_s = 1;
     }
 
     GGML_LOG_INFO("%s: creating a residency set collection (keep_alive = %d s)\n", __func__, res->keep_alive_s);
@@ -674,7 +679,12 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
                         ggml_metal_library_free(lib);
                     }
                 }
-                if (!dev->props.has_simdgroup_mm) {
+                // Only probe simdgroup_mm on Apple GPUs, simdgroup_half8x8 / simdgroup_load(half)
+                // is an Apple-family hardware feature; trying to compile this pipeline on
+                // Intel/AMD Mac GPUs always fails and the existing pipeline compiler logs the
+                // failure via GGML_LOG_ERROR("incompatible pipeline ..."), which test harnesses
+                // pattern-match as fatal.
+                if (!dev->props.has_simdgroup_mm && [dev->mtl_device supportsFamily:MTLGPUFamilyApple1]) {
                     const char * src_simd_mm =
                         "#include <metal_stdlib>\n"
                         "using namespace metal;\n"
@@ -751,7 +761,7 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
                     "    auto tB = B.slice((int)tgid.x, 0); \n"
                     " \n"
                     "    matmul2d< \n"
-                    "        matmul2d_descriptor(8, 8, dynamic_extent), \n"
+                    "        matmul2d_descriptor(16, 16, dynamic_extent), \n"
                     "        execution_simdgroups<4>> mm; \n"
                     " \n"
                     "    auto cT = mm.get_destination_cooperative_tensor<decltype(tA), decltype(tB), float>(); \n"
@@ -801,7 +811,7 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
                     "    auto tB = B.slice((int)tgid.x, 0); \n"
                     " \n"
                     "    matmul2d< \n"
-                    "        matmul2d_descriptor(8, 8, dynamic_extent), \n"
+                    "        matmul2d_descriptor(16, 16, dynamic_extent), \n"
                     "        execution_simdgroups<4>> mm; \n"
                     " \n"
                     "    auto cT = mm.get_destination_cooperative_tensor<decltype(tA), decltype(tB), float>(); \n"
@@ -1104,6 +1114,11 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 case GGML_UNARY_OP_EXP:
                 case GGML_UNARY_OP_SOFTPLUS:
                 case GGML_UNARY_OP_EXPM1:
+                case GGML_UNARY_OP_FLOOR:
+                case GGML_UNARY_OP_CEIL:
+                case GGML_UNARY_OP_ROUND:
+                case GGML_UNARY_OP_TRUNC:
+                case GGML_UNARY_OP_XIELU:
                     return ggml_is_contiguous_rows(op->src[0]) && (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16);
                 default:
                     return false;
@@ -1167,6 +1182,11 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32) &&
                 op->src[1]->type == GGML_TYPE_F32 &&
                 op->type == GGML_TYPE_F32;
+        case GGML_OP_CONV_3D:
+            return ggml_is_contiguous(op->src[0]) &&
+                   ggml_is_contiguous(op->src[1]) &&
+                   (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32) &&
+                   op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_SUM:
             return has_simdgroup_reduction && ggml_is_contiguous(op->src[0]);
         case GGML_OP_TRI:
@@ -1243,7 +1263,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                    op->type == GGML_TYPE_F32 &&
                    (op->src[0]->type == GGML_TYPE_F16 || op->src[0]->type == GGML_TYPE_F32);
         case GGML_OP_UPSCALE:
-            return op->src[0]->type == GGML_TYPE_F32 && op->op_params[0] == GGML_SCALE_MODE_NEAREST && !(op->op_params[0] & GGML_SCALE_FLAG_ANTIALIAS);
+            return op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_POOL_1D:
             return ggml_is_contiguous(op->src[0]) && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_POOL_2D:
@@ -1263,6 +1283,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_ARGSORT:
         case GGML_OP_TOP_K:
         case GGML_OP_ARANGE:
+        case GGML_OP_ROLL:
             return true;
         case GGML_OP_FLASH_ATTN_EXT:
             // for new head sizes, add checks here
@@ -1277,11 +1298,30 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 op->src[0]->ne[0] != 128 &&
                 op->src[0]->ne[0] != 192 &&
                 op->src[0]->ne[0] != 256 &&
+                op->src[0]->ne[0] != 320 &&
+                op->src[0]->ne[0] != 512 &&
                 op->src[0]->ne[0] != 576) {
                 return false;
             }
             if (op->src[1]->type != op->src[2]->type) {
                 return false;
+            }
+            switch (op->src[1]->type) {
+                case GGML_TYPE_F32:
+                case GGML_TYPE_F16:
+                case GGML_TYPE_Q8_0:
+                case GGML_TYPE_Q4_0:
+                case GGML_TYPE_Q4_1:
+                case GGML_TYPE_Q5_0:
+                case GGML_TYPE_Q5_1:
+                    break;
+                case GGML_TYPE_BF16:
+                    if (!has_bfloat) {
+                        return false;
+                    }
+                    break;
+                default:
+                    return false;
             }
             return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
         case GGML_OP_SSM_CONV:
@@ -1290,10 +1330,12 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_RWKV_WKV6:
         case GGML_OP_RWKV_WKV7:
             return true;
+        case GGML_OP_GATED_DELTA_NET:
+            return has_simdgroup_reduction && op->src[2]->ne[0] % 32 == 0;
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
-            return op->src[0]->type != GGML_TYPE_TQ1_0 && has_simdgroup_reduction;
+            return op->src[0]->type != GGML_TYPE_TQ1_0 && !ggml_is_tbq_or_pq(op->src[0]->type) && has_simdgroup_reduction && op->src[0]->type != GGML_TYPE_NVFP4;
         case GGML_OP_SET:
         case GGML_OP_CPY:
         case GGML_OP_DUP:
@@ -1306,6 +1348,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                            case GGML_TYPE_F16:
                            case GGML_TYPE_BF16:
                            case GGML_TYPE_Q8_0:
+                           case GGML_TYPE_Q1_0:
                            case GGML_TYPE_Q4_0:
                            case GGML_TYPE_Q4_1:
                            case GGML_TYPE_Q5_0:
@@ -1332,6 +1375,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                             default:
                                 return false;
                         }
+                    case GGML_TYPE_Q1_0:
                     case GGML_TYPE_Q4_0:
                     case GGML_TYPE_Q4_1:
                     case GGML_TYPE_Q5_0:
@@ -1351,7 +1395,7 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 };
             }
         case GGML_OP_GET_ROWS:
-            return op->src[0]->type != GGML_TYPE_TQ1_0;
+            return op->src[0]->type != GGML_TYPE_NVFP4 && op->src[0]->type != GGML_TYPE_TQ1_0;
         case GGML_OP_SET_ROWS:
             {
                 if (op->src[0]->type != GGML_TYPE_F32) {
@@ -1416,7 +1460,7 @@ struct ggml_metal_buffer {
     bool use_residency_sets;
 
     // optional MTLResidencySet
-    // note: cannot use explicity "id<MTLResidencySet>" here because it is not available on certain OSes
+    // note: cannot use explicitly "id<MTLResidencySet>" here because it is not available on certain OSes
     id rset;
 
     // pointers to global device

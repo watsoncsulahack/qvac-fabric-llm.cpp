@@ -4,7 +4,7 @@
 #include "generic_unary_head.glsl"
 #include "dequant_funcs.glsl"
 
-#if defined(DATA_A_IQ4_NL) || defined(DATA_A_MXFP4)
+#if defined(DATA_A_IQ4_NL) || defined(DATA_A_MXFP4) || defined(DATA_A_NVFP4)
 // 16 invocations needed for init_iq_shmem
 layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
 #else
@@ -37,15 +37,15 @@ void main() {
         v = v * dm.x + vec4(dm.y);
 
 #if QUANT_R == 2
-        data_d[dst_idx + j/2 +             0] = v[0];
-        data_d[dst_idx + j/2 + QUANT_K/2 + 0] = v[1];
-        data_d[dst_idx + j/2 +             1] = v[2];
-        data_d[dst_idx + j/2 + QUANT_K/2 + 1] = v[3];
+        data_d[dst_idx + j/2 +             0] = D_TYPE(v[0]);
+        data_d[dst_idx + j/2 + QUANT_K/2 + 0] = D_TYPE(v[1]);
+        data_d[dst_idx + j/2 +             1] = D_TYPE(v[2]);
+        data_d[dst_idx + j/2 + QUANT_K/2 + 1] = D_TYPE(v[3]);
 #else
-        data_d[dst_idx + j + 0] = v[0];
-        data_d[dst_idx + j + 1] = v[1];
-        data_d[dst_idx + j + 2] = v[2];
-        data_d[dst_idx + j + 3] = v[3];
+        data_d[dst_idx + j + 0] = D_TYPE(v[0]);
+        data_d[dst_idx + j + 1] = D_TYPE(v[1]);
+        data_d[dst_idx + j + 2] = D_TYPE(v[2]);
+        data_d[dst_idx + j + 3] = D_TYPE(v[3]);
 #endif
     }
 }

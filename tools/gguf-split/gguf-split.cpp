@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <climits>
+#include <clocale>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -327,7 +328,7 @@ struct split_strategy {
             }
             total_size = total_size / 1000 / 1000; // convert to megabytes
             printf("split %05d: n_tensors = %" PRIi64 ", total_size = %zuM\n", i_split + 1, gguf_get_n_tensors(ctx_out), total_size);
-            
+
             if (params.verbose) {
                 for (int i = 0; i < gguf_get_n_tensors(ctx_out); ++i) {
                     const char * t_name = gguf_get_tensor_name(ctx_out, i);
@@ -629,6 +630,8 @@ static void gguf_merge(const split_params & split_params) {
 }
 
 int main(int argc, const char ** argv) {
+    std::setlocale(LC_NUMERIC, "C");
+
     split_params params;
     split_params_parse(argc, argv, params);
 

@@ -361,6 +361,11 @@ bool parse_cpu_mask(const std::string & mask, bool (&boolmask)[GGML_MAX_N_THREAD
 }
 
 void common_init() {
+#if defined(_WIN32)
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+
     llama_log_set(common_log_default_callback, NULL);
 
 #ifdef NDEBUG
@@ -369,7 +374,7 @@ void common_init() {
     const char * build_type = " (debug)";
 #endif
 
-    LOG_INF("build: %d (%s) with %s for %s%s\n", LLAMA_BUILD_NUMBER, LLAMA_COMMIT, LLAMA_COMPILER, LLAMA_BUILD_TARGET, build_type);
+    LOG_DBG("build: %d (%s) with %s for %s%s\n", LLAMA_BUILD_NUMBER, LLAMA_COMMIT, LLAMA_COMPILER, LLAMA_BUILD_TARGET, build_type);
 }
 
 std::string common_params_get_system_info(const common_params & params) {
@@ -658,6 +663,97 @@ bool string_parse_kv_override(const char * data, std::vector<llama_model_kv_over
     return true;
 }
 
+static inline bool glob_class_match(const char c, const char * pattern, const char * class_end) {
+    const char * class_start = pattern;
+    bool negated = false;
+
+    if (*class_start == '!') {
+        negated = true;
+        class_start++;
+    }
+
+    // If first character after negation is ']' or '-', treat it as literal
+    if (*class_start == ']' || *class_start == '-') {
+        if (class_start < class_end && *class_start == c) {
+            return !negated;
+        }
+        class_start++;
+    }
+
+    bool matched = false;
+
+    while (class_start < class_end) {
+        if (class_start + 2 < class_end && class_start[1] == '-' && class_start[2] != ']') {
+            char start_char = *class_start;
+            char end_char = class_start[2];
+            if (c >= start_char && c <= end_char) {
+                matched = true;
+                break;
+            }
+            class_start += 3;
+        } else {
+            if (*class_start == c) {
+                matched = true;
+                break;
+            }
+            class_start++;
+        }
+    }
+
+    return negated ? !matched : matched;
+}
+
+// simple glob: * matches non-/ chars, ** matches anything including /, [] matches character class
+static inline bool glob_match(const char * pattern, const char * str) {
+    if (*pattern == '\0') {
+        return *str == '\0';
+    }
+    if (pattern[0] == '*' && pattern[1] == '*') {
+        const char * p = pattern + 2;
+        if (glob_match(p, str)) return true;
+        if (*str != '\0') return glob_match(pattern, str + 1);
+        return false;
+    }
+    if (*pattern == '*') {
+        const char * p = pattern + 1;
+        for (; *str != '\0' && *str != '/'; str++) {
+            if (glob_match(p, str)) return true;
+        }
+        return glob_match(p, str);
+    }
+    if (*pattern == '?' && *str != '\0' && *str != '/') {
+        return glob_match(pattern + 1, str + 1);
+    }
+    if (*pattern == '[') {
+        const char * class_end = pattern + 1;
+        // If first character after '[' is ']' or '-', treat it as literal
+        if (*class_end == ']' || *class_end == '-') {
+            class_end++;
+        }
+        while (*class_end != '\0' && *class_end != ']') {
+            class_end++;
+        }
+        if (*class_end == ']') {
+            if (*str == '\0') return false;
+            bool matched = glob_class_match(*str, pattern + 1, class_end);
+            return matched && glob_match(class_end + 1, str + 1);
+        } else {
+            if (*str == '[') {
+                return glob_match(pattern + 1, str + 1);
+            }
+            return false;
+        }
+    }
+    if (*pattern == *str) {
+        return glob_match(pattern + 1, str + 1);
+    }
+    return false;
+}
+
+bool glob_match(const std::string & pattern, const std::string & str) {
+    return glob_match(pattern.c_str(), str.c_str());
+}
+
 //
 // Filesystem utils
 //
@@ -678,7 +774,7 @@ bool fs_validate_filename(const std::string & filename, bool allow_subdirs) {
 
     size_t offset = 0;
     while (offset < filename.size()) {
-        utf8_parse_result result = parse_utf8_codepoint(filename, offset);
+        utf8_parse_result result = common_parse_utf8_codepoint(filename, offset);
 
         if (result.status != utf8_parse_result::SUCCESS) {
             return false;
@@ -1045,9 +1141,6 @@ struct common_init_result::impl {
     std::vector<llama_sampler_seq_config> samplers_seq_config;
 };
 
-common_init_result::common_init_result() :
-    pimpl(new impl{}) {}
-
 common_init_result::common_init_result(common_params & params) :
     pimpl(new impl{}) {
     auto mparams = common_model_params_to_llama(params);
@@ -1072,7 +1165,7 @@ common_init_result::common_init_result(common_params & params) :
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
-    // load and optionally apply lora adapters (must be loaded before context creation)
+    // load and optionally apply lora adapters
     for (auto & la : params.lora_adapters) {
         llama_adapter_lora_ptr lora;
         lora.reset(llama_adapter_lora_init(model, la.path.c_str()));
@@ -1157,6 +1250,9 @@ llama_context * common_init_result::context() {
 }
 
 common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
+    if (seq_id < 0 || seq_id >= (int) pimpl->samplers.size()) {
+        return nullptr;
+    }
     return pimpl->samplers[seq_id].get();
 }
 
@@ -1170,22 +1266,14 @@ std::vector<llama_adapter_lora_ptr> & common_init_result::lora() {
     return pimpl->lora;
 }
 
-common_init_result_ptr common_init_from_params(common_params & params) {
-    common_init_result_ptr res(new common_init_result(params));
-
-    llama_model * model = res->model();
-    if (model == NULL) {
-        LOG_ERR("%s: failed to load model '%s'\n", __func__, params.model.path.c_str());
-        return res;
-    }
+common_init_result_ptr common_init_from_model_and_params(llama_model* model, common_init_result_ptr res, common_params & params) {
+    const llama_vocab * vocab = llama_model_get_vocab(model);
 
     llama_context * lctx = res->context();
     if (lctx == NULL) {
         LOG_ERR("%s: failed to create context with model '%s'\n", __func__, params.model.path.c_str());
         return res;
     }
-
-    const llama_vocab * vocab = llama_model_get_vocab(model);
 
     if (params.ctx_shift && !llama_memory_can_shift(llama_get_memory(lctx))) {
         LOG_WRN("%s: KV cache shifting is not supported for this context, disabling KV cache shifting\n", __func__);
@@ -1287,20 +1375,38 @@ common_init_result_ptr common_init_from_params(common_params & params) {
 
 common_init_result::~common_init_result() = default;
 
-common_init_result_ptr common_init_from_model_and_params(llama_model * model, common_params & params) {
-    common_init_result_ptr res(new common_init_result());
-    auto & pimpl  = res->pimpl;
-    auto   cparams = common_context_params_to_llama(params);
+common_init_result_ptr common_init_from_params(common_params & params) {
+    common_init_result_ptr res(new common_init_result(params));
 
+    llama_model * model = res->model();
+    if (model == NULL) {
+        LOG_ERR("%s: failed to load model '%s'\n", __func__, params.model.path.c_str());
+        return res;
+    }
+
+    return common_init_from_model_and_params(model, std::move(res), params);
+}
+
+// Compat overload for callers that have already loaded a model externally
+// and don't have a params.model.path the file-based constructor can open.
+common_init_result_ptr common_init_from_model_and_params(llama_model * model, common_params & params) {
+    if (model == nullptr) {
+        return common_init_result_ptr();
+    }
+
+    common_init_result_ptr res(new common_init_result(params));
+    auto & pimpl = res->pimpl;
+    pimpl->model.reset(model);
+
+    auto cparams = common_context_params_to_llama(params);
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
-    // load and optionally apply lora adapters (must be loaded before context creation)
     for (auto & la : params.lora_adapters) {
         llama_adapter_lora_ptr lora;
         lora.reset(llama_adapter_lora_init(model, la.path.c_str()));
         if (lora == nullptr) {
             LOG_ERR("%s: failed to load lora adapter '%s'\n", __func__, la.path.c_str());
-            return res; // model NOT owned here - caller retains ownership on error
+            return res;
         }
 
         char buf[1024];
@@ -1334,7 +1440,6 @@ common_init_result_ptr common_init_from_model_and_params(llama_model * model, co
 
     pimpl->samplers.resize(cparams.n_seq_max);
     pimpl->samplers_seq_config.resize(cparams.n_seq_max);
-
     for (int i = 0; i < (int) cparams.n_seq_max; ++i) {
         pimpl->samplers[i].reset(common_sampler_init(model, params.sampling));
         pimpl->samplers_seq_config[i] = { i, common_sampler_get(pimpl->samplers[i].get()) };
@@ -1347,13 +1452,12 @@ common_init_result_ptr common_init_from_model_and_params(llama_model * model, co
 
     llama_context * lctx = llama_init_from_model(model, cparams);
     if (lctx == NULL) {
-        LOG_ERR("%s: failed to create context\n", __func__);
+        LOG_ERR("%s: failed to create context with externally-loaded model\n", __func__);
         return res;
     }
-
-    pimpl->model.reset(model); // take ownership after successful context creation
     pimpl->context.reset(lctx);
-    return res;
+
+    return common_init_from_model_and_params(model, std::move(res), params);
 }
 
 std::string get_model_endpoint() {
@@ -1417,6 +1521,7 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
 
     mparams.progress_callback           = params.load_progress_callback;
     mparams.progress_callback_user_data = params.load_progress_callback_user_data;
+    mparams.no_alloc                    = params.no_alloc;
 
     return mparams;
 }
@@ -1972,7 +2077,7 @@ ggml_opt_dataset_t common_opt_sft_dataset_init(
     // While chat templates render appropriately, we must parse the rendered string to find
     // the boundaries of the "assistant" role to calculate loss gracefully.
     // Currently, this only supports ChatML (Qwen, etc.) and Gemma formats.
-    // A more reliable, model-agnostic method would require common_chat_templates_apply to 
+    // A more reliable, model-agnostic method would require common_chat_templates_apply to
     // return token role spans directly, which is not yet supported in common/chat.cpp.
     const std::string START_TAG = "<|im_start|>";
     const std::string START_SYS = "<|im_start|>system\n";

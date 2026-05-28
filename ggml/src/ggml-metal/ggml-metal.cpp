@@ -14,7 +14,7 @@
 #define GGML_METAL_MAX_DEVICES 16
 
 // number of Metal devices
-// note: can be overriden with GGML_METAL_DEVICES env to simulate virtual devices
+// note: can be overridden with GGML_METAL_DEVICES env to simulate virtual devices
 static int g_devices = 1;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -90,6 +90,8 @@ static ggml_backend_buffer_i ggml_backend_metal_buffer_shared_i = {
     /* .memset_tensor   = */ ggml_backend_metal_buffer_shared_memset_tensor,
     /* .set_tensor      = */ ggml_backend_metal_buffer_shared_set_tensor,
     /* .get_tensor      = */ ggml_backend_metal_buffer_shared_get_tensor,
+    /* .set_tensor_2d   = */ NULL,
+    /* .get_tensor_2d   = */ NULL,
     /* .cpy_tensor      = */ ggml_backend_metal_buffer_shared_cpy_tensor,
     /* .clear           = */ ggml_backend_metal_buffer_shared_clear,
     /* .reset           = */ NULL,
@@ -158,15 +160,17 @@ static void ggml_backend_metal_buffer_private_clear(ggml_backend_buffer_t buffer
 }
 
 static ggml_backend_buffer_i ggml_backend_metal_buffer_private_i = {
-    /* .free_buffer     = */ ggml_backend_metal_buffer_private_free_buffer,
-    /* .get_base        = */ ggml_backend_metal_buffer_private_get_base,
-    /* .init_tensor     = */ NULL,
-    /* .memset_tensor   = */ ggml_backend_metal_buffer_private_memset_tensor,
-    /* .set_tensor      = */ ggml_backend_metal_buffer_private_set_tensor,
-    /* .get_tensor      = */ ggml_backend_metal_buffer_private_get_tensor,
-    /* .cpy_tensor      = */ ggml_backend_metal_buffer_private_cpy_tensor,
-    /* .clear           = */ ggml_backend_metal_buffer_private_clear,
-    /* .reset           = */ NULL,
+    /* .free_buffer             = */ ggml_backend_metal_buffer_private_free_buffer,
+    /* .get_base                = */ ggml_backend_metal_buffer_private_get_base,
+    /* .init_tensor             = */ NULL,
+    /* .memset_tensor           = */ ggml_backend_metal_buffer_private_memset_tensor,
+    /* .set_tensor              = */ ggml_backend_metal_buffer_private_set_tensor,
+    /* .get_tensor              = */ ggml_backend_metal_buffer_private_get_tensor,
+    /* .get_tensor_2d_async     = */ NULL,
+    /* .set_tensor_2d_async     = */ NULL,
+    /* .cpy_tensor              = */ ggml_backend_metal_buffer_private_cpy_tensor,
+    /* .clear                   = */ ggml_backend_metal_buffer_private_clear,
+    /* .reset                   = */ NULL,
 };
 
 static bool ggml_backend_buffer_is_metal(ggml_backend_buffer_t buffer) {
@@ -195,6 +199,14 @@ typedef std::unique_ptr<ggml_backend_metal_buffer_type, ggml_backend_metal_buffe
 static ggml_backend_buffer_t ggml_backend_metal_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size, bool shared) {
     ggml_metal_device_t ctx_dev = (ggml_metal_device_t)buft->device->context;
     ggml_metal_buffer_t res = ggml_metal_buffer_init(ctx_dev, size, shared);
+
+    // ggml_metal_buffer_init returns NULL on allocation / residency-set failure.
+    // Without this guard the next line dereferences a null pointer at offset 0x10
+    // (the is_shared field), crashing the mmproj graph allocator with
+    // EXC_BAD_ACCESS in ggml_metal_buffer_is_shared.
+    if (res == NULL) {
+        return NULL;
+    }
 
     ggml_backend_buffer_i buf_i = ggml_metal_buffer_is_shared(res)
         ? ggml_backend_metal_buffer_shared_i
@@ -563,6 +575,8 @@ static ggml_backend_i ggml_backend_metal_i = {
     /* .free                    = */ ggml_backend_metal_free,
     /* .set_tensor_async        = */ ggml_backend_metal_set_tensor_async,
     /* .get_tensor_async        = */ ggml_backend_metal_get_tensor_async,
+    /* .get_tensor_2d_async     = */ NULL,
+    /* .set_tensor_2d_async     = */ NULL,
     /* .cpy_tensor_async        = */ ggml_backend_metal_cpy_tensor_async, // only needed for multi-GPU setups
     /* .synchronize             = */ ggml_backend_metal_synchronize,
     /* .graph_plan_create       = */ NULL,
@@ -726,6 +740,9 @@ static ggml_backend_buffer_t ggml_backend_metal_device_buffer_mapped(ggml_backen
     ggml_metal_device_t ctx_dev = (ggml_metal_device_t)dev->context;
 
     ggml_metal_buffer_t res = ggml_metal_buffer_map(ctx_dev, ptr, size, max_tensor_size);
+    if (res == NULL) {
+        return NULL;
+    }
 
     const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx_dev);
 

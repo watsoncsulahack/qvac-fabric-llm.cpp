@@ -44,7 +44,7 @@ extern "C" {
             int64_t        ne_label,     // number of elements per label
             int64_t        ndata,        // total number of datapoints/labels
             int64_t        ndata_shard); // number of datapoints/labels per shard (unit at which the dataset is shuffled/copied)
-    
+
     GGML_API ggml_opt_dataset_t ggml_opt_dataset_init_with_masks(
             enum ggml_type type_data,    // the type for the internal data tensor
             enum ggml_type type_label,   // the type for the internal labels tensor
@@ -157,7 +157,7 @@ extern "C" {
     GGML_API ggml_opt_context_t ggml_opt_init(struct ggml_opt_params params);
     GGML_API void ggml_opt_free(ggml_opt_context_t opt_ctx);
 
-    // set gradients to zero, initilize loss, and optionally reset the optimizer
+    // set gradients to zero, initialize loss, and optionally reset the optimizer
     GGML_API void ggml_opt_reset(ggml_opt_context_t opt_ctx, bool optimizer);
 
     GGML_API bool ggml_opt_static_graphs(ggml_opt_context_t opt_ctx); // whether the graphs are allocated_statically
@@ -174,7 +174,7 @@ extern "C" {
 
     // get the gradient accumulator for a node from the forward graph
     GGML_API struct ggml_tensor * ggml_opt_grad_acc(ggml_opt_context_t opt_ctx, struct ggml_tensor * node);
-    
+
     // get optimizer state tensors (momentum and variance for AdamW)
     GGML_API int64_t ggml_opt_get_iter(ggml_opt_context_t opt_ctx);
     GGML_API void    ggml_opt_set_iter(ggml_opt_context_t opt_ctx, int64_t iter);

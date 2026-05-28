@@ -29,7 +29,7 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     ggml_tensor * inp_per_layer = nullptr;
-    if (model.tok_embd_per_layer) {
+    if (model.per_layer_tok_embd) {
         inp_per_layer = build_inp_per_layer();
         ggml_build_forward_expand(gf, inp_per_layer);
 
@@ -38,22 +38,15 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
     }
 
     for (int il = 0; il < n_layer; ++il) {
-        // Gemma 4 uses different head dimensions for SWA vs full-attention layers
-        const int64_t n_embd_head = hparams.is_swa(il)
-            ? (int64_t)hparams.n_embd_head_k_swa
-            : (int64_t)hparams.n_embd_head_k;
-        const int64_t n_embd_head_v_cur = hparams.is_swa(il)
-            ? (int64_t)hparams.n_embd_head_v_swa
-            : (int64_t)hparams.n_embd_head_v;
-        GGML_ASSERT(n_embd_head == n_embd_head_v_cur);
+        const int64_t n_embd_head = hparams.n_embd_head_k(il);
+        GGML_ASSERT(n_embd_head == hparams.n_embd_head_v(il));
 
         const int64_t n_head    = hparams.n_head(il);
         const int64_t n_head_kv = hparams.n_head_kv(il);
 
         const float freq_base_l  = model.get_rope_freq_base(cparams, il);
         const float freq_scale_l = model.get_rope_freq_scale(cparams, il);
-        // gemma4: rope dim matches per-layer head dim
-        const int   n_rot_l      = (int)n_embd_head;
+        const int   n_rot_l      = hparams.n_rot(il);
 
         // norm
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
@@ -69,7 +62,7 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
         // this is to mirror Gemma4Attention in pytorch code
         ggml_tensor * Qcur;
         {
-            Qcur = build_lora_mm(model.layers[il].wq, cur);
+            Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s);
             cb(Qcur, "Qcur", il);
 
             Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens);
@@ -84,11 +77,11 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
 
         // self-attention
         if (hparams.has_kv(il)) {
-            ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
+            ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s);
             cb(Kcur, "Kcur", il);
 
             ggml_tensor * Vcur = model.layers[il].wv
-                                    ? build_lora_mm(model.layers[il].wv, cur)
+                                    ? build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s)
                                     : Kcur; // if v_proj is not present, use Kcur as Vcur
             cb(Vcur, "Vcur", il);
 
@@ -107,12 +100,12 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
             cb(Kcur, "Kcur_pos", il);
 
             cur = build_attn(inp_attn, model.layers[il].wo,
-                    nullptr, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
+                    nullptr, model.layers[il].wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
                     hparams.f_attention_scale, il);
         } else {
             // reuse KV cache of earlier layers
             cur = build_attn(inp_attn,
-                    model.layers[il].wo, nullptr,
+                    model.layers[il].wo, nullptr, model.layers[il].wo_s,
                     Qcur, nullptr, nullptr, nullptr, nullptr, nullptr, hparams.f_attention_scale, il);
         }
 
@@ -132,9 +125,58 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
         // feed-forward network
         const bool is_moe_layer = model.layers[il].ffn_gate_inp != nullptr;
         if (is_moe_layer) {
-            // MoE layers are not supported in this QVAC port (Gemma 4 E2B/E4B are non-MoE).
-            // To add MoE support, adapt the upstream build_moe_ffn call to QVAC's signature.
-            GGML_ABORT("Gemma 4 MoE layers are not supported in this QVAC build");
+            // MLP (shared exp)
+            ggml_tensor * cur_mlp = build_norm(attn_out,
+                    model.layers[il].ffn_norm, nullptr,
+                    LLM_NORM_RMS, il);
+            cb(cur_mlp, "ffn_norm_1", il);
+
+            cur_mlp = build_ffn(cur_mlp,
+                    model.layers[il].ffn_up,   nullptr, model.layers[il].ffn_up_s,
+                    model.layers[il].ffn_gate, nullptr, model.layers[il].ffn_gate_s,
+                    model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
+                    nullptr,
+                    LLM_FFN_GELU, LLM_FFN_PAR, il);
+            cur_mlp = build_norm(cur_mlp,
+                    model.layers[il].ffn_post_norm_1, nullptr,
+                    LLM_NORM_RMS, il);
+            cb(cur_mlp, "ffn_mlp", il);
+
+            // Expert FFN
+            ggml_tensor * cur_moe = build_norm(attn_out,
+                    model.layers[il].ffn_pre_norm_2, nullptr,
+                    LLM_NORM_RMS, il);
+            cb(cur_moe, "ffn_norm_2", il);
+
+            // custom MoE logits calculation (router operates on attn_out, not cur)
+            ggml_tensor * tmp = ggml_rms_norm(ctx0, attn_out, hparams.f_norm_rms_eps);
+            tmp = ggml_scale(ctx0, tmp, 1.0f / sqrtf((float) n_embd));
+            tmp = ggml_mul(ctx0, tmp, model.layers[il].ffn_gate_inp_s);
+            ggml_tensor * logits = build_lora_mm(model.layers[il].ffn_gate_inp, tmp); // [n_expert, n_tokens]
+            cb(logits, "ffn_moe_logits", il);
+
+            cur_moe = build_moe_ffn(cur_moe,
+                    nullptr, // gate_inp
+                    nullptr, // up_exps
+                    nullptr, // gate_exps
+                    model.layers[il].ffn_down_exps,
+                    nullptr, // exp_probs_b (not used for gemma4)
+                    n_expert, n_expert_used,
+                    LLM_FFN_GELU, true,
+                    1.0f,
+                    LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
+                    il, logits,
+                    model.layers[il].ffn_gate_up_exps,
+                    nullptr, // up_exps_s
+                    nullptr, // gate_exps_s
+                    model.layers[il].ffn_down_exps_s);
+            cur_moe = build_norm(cur_moe,
+                    model.layers[il].ffn_post_norm_2, nullptr,
+                    LLM_NORM_RMS, il);
+            cb(cur_moe, "ffn_moe", il);
+
+            cur = ggml_add(ctx0, cur_mlp, cur_moe);
+            cb(cur, "ffn_moe_combined", il);
         } else {
             cur = build_norm(attn_out,
                     model.layers[il].ffn_norm, nullptr,
@@ -142,9 +184,9 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
             cb(cur, "ffn_norm", il);
 
             cur = build_ffn(cur,
-                    model.layers[il].ffn_up,   nullptr, nullptr,
-                    model.layers[il].ffn_gate, nullptr, nullptr,
-                    model.layers[il].ffn_down, nullptr, nullptr,
+                    model.layers[il].ffn_up,   nullptr, model.layers[il].ffn_up_s,
+                    model.layers[il].ffn_gate, nullptr, model.layers[il].ffn_gate_s,
+                    model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
                     nullptr,
                     LLM_FFN_GELU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
@@ -229,7 +271,7 @@ ggml_tensor * llm_build_gemma4_iswa::build_inp_per_layer() {
         ggml_set_input(inp->tokens);
         res->t_inp_tokens = inp->tokens;
 
-        inp_per_layer = ggml_get_rows  (ctx0, model.tok_embd_per_layer, inp->tokens);
+        inp_per_layer = ggml_get_rows  (ctx0, model.per_layer_tok_embd, inp->tokens);
         inp_per_layer = ggml_reshape_3d(ctx0, inp_per_layer, n_embd_per_layer, n_layer, n_tokens);
         inp_per_layer = ggml_scale     (ctx0, inp_per_layer, tok_embd_scale);
         cb(inp_per_layer, "inp_per_layer_selected", -1);
@@ -238,10 +280,10 @@ ggml_tensor * llm_build_gemma4_iswa::build_inp_per_layer() {
     } else {
         // Multimodal embedding path: use padding token (ID=0) embedding
         // TODO: verify if this is the correct behavior in transformers implementation
-        const int64_t embd_size = model.tok_embd_per_layer->ne[0];  // n_embd_per_layer * n_layer
+        const int64_t embd_size = model.per_layer_tok_embd->ne[0];  // n_embd_per_layer * n_layer
 
         // Extract and dequantize padding token embedding (row 0)
-        ggml_tensor * padding = ggml_view_1d(ctx0, model.tok_embd_per_layer, embd_size, 0);
+        ggml_tensor * padding = ggml_view_1d(ctx0, model.per_layer_tok_embd, embd_size, 0);
         inp_per_layer = ggml_cast (ctx0, padding, GGML_TYPE_F32);
         inp_per_layer = ggml_scale(ctx0, inp_per_layer, tok_embd_scale);
 
