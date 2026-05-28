@@ -1,15 +1,15 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 
-//------------------------------------------------------------------------------
-// neg
-//------------------------------------------------------------------------------
-
 kernel void kernel_neg_f32(
         global const float * src0,
         ulong                offset0,
         global       float * dst,
-        ulong                offsetd
+        ulong                offsetd,
+        int                  n
 ) {
+    if (get_global_id(0) >= n) {
+        return;
+    }
     src0 = (global float*)((global char*)src0 + offset0);
     dst  = (global float*)((global char*)dst + offsetd);
 
@@ -20,8 +20,12 @@ kernel void kernel_neg_f32_4(
         global const float4 * src0,
         ulong                 offset0,
         global       float4 * dst,
-        ulong                 offsetd
+        ulong                 offsetd,
+        int                   n
 ) {
+    if (get_global_id(0) >= n) {
+        return;
+    }
     src0 = (global float4*)((global char*)src0 + offset0);
     dst  = (global float4*)((global char*)dst + offsetd);
 
@@ -32,8 +36,12 @@ kernel void kernel_neg_f16(
         global const half * src0,
         ulong               offset0,
         global       half * dst,
-        ulong               offsetd
+        ulong               offsetd,
+        int                 n
 ) {
+    if (get_global_id(0) >= n) {
+        return;
+    }
     src0 = (global half*)((global char*)src0 + offset0);
     dst  = (global half*)((global char*)dst + offsetd);
 
@@ -44,8 +52,12 @@ kernel void kernel_neg_f16_4(
         global const half4 * src0,
         ulong                offset0,
         global       half4 * dst,
-        ulong                offsetd
+        ulong                offsetd,
+        int                  n
 ) {
+    if (get_global_id(0) >= n) {
+        return;
+    }
     src0 = (global half4*)((global char*)src0 + offset0);
     dst  = (global half4*)((global char*)dst + offsetd);
 

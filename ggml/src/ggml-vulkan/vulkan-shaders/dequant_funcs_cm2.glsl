@@ -13,6 +13,18 @@ float16_t dequantFuncF32(const in decodeBufF32 bl, const in uint blockCoords[2],
     return vf16[idx];
 }
 
+layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBufQ1_0 {
+   block_q1_0 block;
+};
+
+float16_t dequantFuncQ1_0(const in decodeBufQ1_0 bl, const in uint blockCoords[2], const in uint coordInBlock[2])
+{
+    const float16_t d = bl.block.d;
+    const uint idx = coordInBlock[1];
+    const uint bit = (uint(bl.block.qs[(idx & 0x78) >> 3]) >> (idx & 0x7)) & 1u;
+    return bit != 0u ? d : -d;
+}
+
 layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBufQ4_0 {
    block_q4_0_packed16 block;
 };
@@ -741,7 +753,71 @@ float16_t dequantFuncMXFP4(const in decodeBufMXFP4 bl, const in uint blockCoords
 }
 #endif
 
-#if defined(DATA_A_Q4_0)
+#if defined(DATA_A_NVFP4)
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer decodeBufNVFP4 {
+   block_nvfp4 block;
+};
+
+float16_t dequantFuncNVFP4(const in decodeBufNVFP4 bl, const in uint blockCoords[2], const in uint coordInBlock[2])
+{
+    const uint idx = coordInBlock[1];
+    const uint sub = (idx & 0x30) >> 4;
+    const uint iqs = ((idx & 0x30) >> 1) + (idx & 0x7);
+    const uint shift = (idx & 0x8) >> 1;
+    const float d = ue4m3_to_fp32(bl.block.d[sub]);
+    uint qs = uint(bl.block.qs[iqs]);
+    qs = (qs >> shift) & 0xF;
+    return float16_t(kvalues_mxfp4[qs] * d * 0.5);
+}
+#endif
+
+#if defined(DATA_A_TBQ3_0) || defined(DATA_K_TBQ3_0) || defined(DATA_V_TBQ3_0) || \
+    defined(DATA_A_TBQ4_0) || defined(DATA_K_TBQ4_0) || defined(DATA_V_TBQ4_0) || \
+    defined(DATA_A_PQ3_0) || defined(DATA_K_PQ3_0) || defined(DATA_V_PQ3_0) || \
+    defined(DATA_A_PQ4_0) || defined(DATA_K_PQ4_0) || defined(DATA_V_PQ4_0) || \
+    defined(DATA_A_TBQ3_0_64) || defined(DATA_K_TBQ3_0_64) || defined(DATA_V_TBQ3_0_64) || \
+    defined(DATA_A_TBQ4_0_64) || defined(DATA_K_TBQ4_0_64) || defined(DATA_V_TBQ4_0_64) || \
+    defined(DATA_A_PQ3_0_64) || defined(DATA_K_PQ3_0_64) || defined(DATA_V_PQ3_0_64) || \
+    defined(DATA_A_PQ4_0_64) || defined(DATA_K_PQ4_0_64) || defined(DATA_V_PQ4_0_64)
+#include "tq_utils.glsl"
+
+// cm2 decode wrappers: read raw bytes from buffer-reference block, delegate to shared helpers.
+#define DEQUANT_CM2_3BIT(NAME, BLOCK_TYPE) \
+layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBuf##NAME { BLOCK_TYPE block; }; \
+float16_t dequantFunc##NAME(const in decodeBuf##NAME bl, const in uint blockCoords[2], const in uint coordInBlock[2]) { \
+    const uint bit_pos = coordInBlock[1] * 3u;                 \
+    const uint byte_off = bit_pos >> 3u;                       \
+    uint bits16 = uint(bl.block.qs[byte_off])                  \
+                | (uint(bl.block.qs[byte_off + 1u]) << 8u);    \
+    return bl.block.d * float16_t(TBQ3_CB[(bits16 >> (bit_pos & 7u)) & 7u]); \
+}
+
+#define DEQUANT_CM2_4BIT(NAME, BLOCK_TYPE) \
+layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBuf##NAME { BLOCK_TYPE block; }; \
+float16_t dequantFunc##NAME(const in decodeBuf##NAME bl, const in uint blockCoords[2], const in uint coordInBlock[2]) { \
+    const uint idx = coordInBlock[1];                          \
+    const uint raw = uint(bl.block.qs[idx >> 1u]);             \
+    return bl.block.d * float16_t(TBQ4_CB[(idx & 1u) != 0u ? (raw >> 4u) : (raw & 0xFu)]); \
+}
+
+DEQUANT_CM2_3BIT(TBQ3_0, block_tbq3_0)
+DEQUANT_CM2_3BIT(PQ3_0,  block_pq3_0)
+DEQUANT_CM2_4BIT(TBQ4_0, block_tbq4_0)
+DEQUANT_CM2_4BIT(PQ4_0,  block_pq4_0)
+
+DEQUANT_CM2_3BIT(TBQ3_0_64, block_tbq3_0_64)
+DEQUANT_CM2_3BIT(PQ3_0_64,  block_pq3_0_64)
+DEQUANT_CM2_4BIT(TBQ4_0_64, block_tbq4_0_64)
+DEQUANT_CM2_4BIT(PQ4_0_64,  block_pq4_0_64)
+
+#undef DEQUANT_CM2_3BIT
+#undef DEQUANT_CM2_4BIT
+
+#endif
+
+#if defined(DATA_A_Q1_0)
+#define dequantFuncA dequantFuncQ1_0
+#elif defined(DATA_A_Q4_0)
 #define dequantFuncA dequantFuncQ4_0
 #elif defined(DATA_A_Q4_1)
 #define dequantFuncA dequantFuncQ4_1
@@ -791,6 +867,16 @@ float16_t dequantFuncMXFP4(const in decodeBufMXFP4 bl, const in uint blockCoords
 #define dequantFuncA dequantFuncTQ1_0
 #elif defined(DATA_A_MXFP4)
 #define dequantFuncA dequantFuncMXFP4
+#elif defined(DATA_A_NVFP4)
+#define dequantFuncA dequantFuncNVFP4
+#elif defined(DATA_A_TBQ3_0) || defined(DATA_A_TBQ3_0_64)
+#define dequantFuncA dequantFuncTBQ3_0
+#elif defined(DATA_A_TBQ4_0) || defined(DATA_A_TBQ4_0_64)
+#define dequantFuncA dequantFuncTBQ4_0
+#elif defined(DATA_A_PQ3_0) || defined(DATA_A_PQ3_0_64)
+#define dequantFuncA dequantFuncPQ3_0
+#elif defined(DATA_A_PQ4_0) || defined(DATA_A_PQ4_0_64)
+#define dequantFuncA dequantFuncPQ4_0
 #elif defined(DATA_A_F32)
 #define dequantFuncA dequantFuncF32
 #endif

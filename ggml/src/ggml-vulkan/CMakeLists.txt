@@ -105,13 +105,15 @@ if (Vulkan_FOUND)
             ../../../vendor
 
     )
-    target_include_directories(ggml-vulkan PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_cpp_wrapper/include")
+    if (ANDROID)
+        target_include_directories(ggml-vulkan PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_cpp_wrapper/include")
+    endif()
 
     if (FORCE_GGML_VK_PERF_LOGGER)
       add_compile_definitions(FORCE_GGML_VK_PERF_LOGGER)
     endif()
     # Workaround to the "can't dereference invalidated vector iterator" bug in clang-cl debug build
-    # Posssibly relevant: https://stackoverflow.com/questions/74748276/visual-studio-no-displays-the-correct-length-of-stdvector
+    # Possibly relevant: https://stackoverflow.com/questions/74748276/visual-studio-no-displays-the-correct-length-of-stdvector
     if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         add_compile_definitions(_ITERATOR_DEBUG_LEVEL=0)
     endif()

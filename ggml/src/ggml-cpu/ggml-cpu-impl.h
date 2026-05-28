@@ -62,6 +62,25 @@ struct ggml_compute_params {
 #endif
 #endif
 
+// Portable prefetch hint for CPU kernels.
+//   rw:        0 = read, 1 = write
+//   locality:  0..3, higher = keep closer in the cache hierarchy
+// Maps to __builtin_prefetch on GCC/Clang, _mm_prefetch on MSVC (x86/x64),
+// and is a no-op on compilers / architectures that expose neither.
+#if defined(__GNUC__) || defined(__clang__)
+#    define GGML_CPU_PREFETCH(addr, rw, locality) __builtin_prefetch((addr), (rw), (locality))
+#elif defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+     // _mm_prefetch takes _MM_HINT_{NTA,T0,T1,T2}; map locality 0..3 onto them.
+     // Write hints are not directly supported; fall back to a read hint.
+#    define GGML_CPU_PREFETCH(addr, rw, locality) \
+         _mm_prefetch((const char *)(addr), \
+             (locality) == 0 ? _MM_HINT_NTA : \
+             (locality) == 1 ? _MM_HINT_T2  : \
+             (locality) == 2 ? _MM_HINT_T1  : _MM_HINT_T0)
+#else
+#    define GGML_CPU_PREFETCH(addr, rw, locality) ((void)0)
+#endif
+
 #if defined(__s390x__) && defined(__VEC__)
 #ifndef __VXE__
 #define __VXE__
@@ -306,6 +325,7 @@ inline static uint8x16_t ggml_vqtbl1q_u8(uint8x16_t a, uint8x16_t b) {
 
 #if !defined(__ARM_FEATURE_DOTPROD)
 
+// NOTE: this fallback produces the same total sum as native vdotq_s32 but with different per-lane grouping — do not use when individual lane values matter.
 inline static int32x4_t ggml_vdotq_s32(int32x4_t acc, int8x16_t a, int8x16_t b) {
     const int16x8_t p0 = vmull_s8(vget_low_s8 (a), vget_low_s8 (b));
     const int16x8_t p1 = vmull_s8(vget_high_s8(a), vget_high_s8(b));
@@ -318,6 +338,15 @@ inline static int32x4_t ggml_vdotq_s32(int32x4_t acc, int8x16_t a, int8x16_t b) 
 #define ggml_vdotq_s32(a, b, c) vdotq_s32(a, b, c)
 
 #endif // !defined(__ARM_FEATURE_DOTPROD)
+
+static inline int32x4_t ggml_nvfp4_dot8(const int8x8_t q4_lo, const int8x8_t q8_lo,
+                                         const int8x8_t q4_hi, const int8x8_t q8_hi) {
+    const int16x8_t p_lo = vmull_s8(q4_lo, q8_lo);
+    const int16x8_t p_hi = vmull_s8(q4_hi, q8_hi);
+    const int32x4_t sum_lo = vpaddlq_s16(p_lo);
+    const int32x4_t sum_hi = vpaddlq_s16(p_hi);
+    return vaddq_s32(sum_lo, sum_hi);
+}
 
 #endif // defined(__ARM_NEON)
 

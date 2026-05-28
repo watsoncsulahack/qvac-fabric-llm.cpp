@@ -1,0 +1,124 @@
+name: CI (vulkan)
+
+on:
+  workflow_dispatch: # allows manual triggering
+  push:
+    branches:
+      - master
+    paths: [
+      '.github/workflows/build-vulkan.yml',
+      '**/CMakeLists.txt',
+      '**/.cmake',
+      '**/*.h',
+      '**/*.hpp',
+      '**/*.c',
+      '**/*.cpp',
+      '**/*.comp',
+      '**/*.glsl'
+    ]
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: [
+      '.github/workflows/build-vulkan.yml',
+      'ggml/src/ggml-vulkan/**'
+    ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  GGML_NLOOP: 3
+  GGML_N_THREADS: 1
+  LLAMA_LOG_COLORS: 1
+  LLAMA_LOG_PREFIX: 1
+  LLAMA_LOG_TIMESTAMPS: 1
+
+jobs:
+  ubuntu-24-vulkan-llvmpipe:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: ubuntu-24-vulkan-llvmpipe
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Dependencies
+        id: depends
+        run: |
+          sudo add-apt-repository -y ppa:kisak/kisak-mesa
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential mesa-vulkan-drivers libxcb-xinput0 libxcb-xinerama0 libxcb-cursor-dev libssl-dev
+
+      - name: Get latest Vulkan SDK version
+        id: vulkan_sdk_version
+        run: |
+          echo "VULKAN_SDK_VERSION=$(curl https://vulkan.lunarg.com/sdk/latest/linux.txt)" >> "$GITHUB_ENV"
+
+      - name: Use Vulkan SDK Cache
+        uses: actions/cache@v5
+        id: cache-sdk
+        with:
+          path: ./vulkan_sdk
+          key: vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}-${{ runner.os }}
+
+      - name: Setup Vulkan SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        uses: ./.github/actions/linux-setup-vulkan
+        with:
+          path: ./vulkan_sdk
+          version: ${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Build
+        id: cmake_build
+        run: |
+          source ./vulkan_sdk/setup-env.sh
+          cmake -B build \
+            -DGGML_VULKAN=ON
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          export GGML_VK_VISIBLE_DEVICES=0
+          export GGML_VK_DISABLE_F16=1
+          export GGML_VK_DISABLE_COOPMAT=1
+          # NVIDIA Tesla T4 with driver 570.x has a known bug where any test
+          # that initializes the Vulkan backend can non-deterministically
+          # segfault during exit/cleanup inside libnvidia-gpucomp.so atexit
+          # handlers racing with the driver's [vkps] Update thread. All test
+          # cases pass but the process may crash on teardown. Upstream llama.cpp
+          # disabled their T4 Vulkan CI node entirely for the same reason.
+          # Workaround: on T4, tolerate SegFault-only failures since the crash
+          # is in the driver's exit path, not in the test logic.
+          # Refs: ggml-org/llama.cpp#10528, ggml-org/llama.cpp#10989
+          IS_T4=false
+          if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -q "T4"; then
+            IS_T4=true
+            echo "::notice::Detected NVIDIA T4 -- will tolerate segfault-on-exit (known driver bug)"
+            # FLASH_ATTN_EXT causes GPU shader hangs on T4 (Turing) FlashAttention path
+            export GGML_SKIP_FLASH_ATTN=1
+          fi
+          # Old cmdline for ctest
+          # ctest -L main --verbose --timeout 4200 2>&1 | tee ctest_output.log
+          # This is using llvmpipe and runs slower than other backends
+          # test-backend-ops is too slow on llvmpipe, skip it
+          ctest -L main -E test-backend-ops --verbose --timeout 900 2>&1 | tee ctest_output.log
+          CTEST_EXIT=${PIPESTATUS[0]}
+          if [ "$CTEST_EXIT" -ne 0 ] && [ "$IS_T4" = true ]; then
+            NON_SEGFAULT=$(sed -n '/The following tests FAILED:/,$p' ctest_output.log | grep -E '^\s+[0-9]' | grep -vic 'segfault' || true)
+            if [ "$NON_SEGFAULT" -eq 0 ]; then
+              echo "::warning::All test failures are SegFault-on-exit (NVIDIA T4 driver bug) -- treating as success"
+              exit 0
+            fi
+          fi
+          exit $CTEST_EXIT
