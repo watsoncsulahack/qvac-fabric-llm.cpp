@@ -1347,6 +1347,8 @@ jobs:
         include:
           - build: 'arm64-cpu'
             defines: '-D ANDROID_ABI=arm64-v8a -D ANDROID_PLATFORM=android-31 -D CMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake -D GGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.5-a+fp16+i8mm -G Ninja -D LLAMA_CURL=OFF -D GGML_OPENMP=OFF'
+          - build: 'arm64-vulkan'
+            defines: '-DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-31 -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.5-a+fp16+i8mm -DGGML_VULKAN=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_CURL=OFF -DGGML_OPENMP=OFF -DVulkan_INCLUDE_DIR=${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include -DVulkan_LIBRARY=${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/31/libvulkan.so -G Ninja'
           - build: 'arm64-snapdragon'
             defines: '--preset arm64-android-snapdragon-release'
 
@@ -1354,6 +1356,36 @@ jobs:
       - name: Clone
         id: checkout
         uses: actions/checkout@v4
+
+      - name: Get latest Vulkan SDK version
+        id: vulkan_sdk_version
+        if: ${{ matrix.build == 'arm64-vulkan' }}
+        run: |
+          echo "VULKAN_SDK_VERSION=$(curl https://vulkan.lunarg.com/sdk/latest/linux.txt)" >> "$GITHUB_ENV"
+
+      - name: Use Vulkan SDK Cache
+        uses: actions/cache@v4
+        id: cache-sdk
+        if: ${{ matrix.build == 'arm64-vulkan' }}
+        with:
+          path: ./vulkan_sdk
+          key: vulkan-sdk-${{ env.VULKAN_SDK_VERSION }}-${{ runner.os }}
+
+      - name: Setup Vulkan SDK
+        if: ${{ matrix.build == 'arm64-vulkan' && steps.cache-sdk.outputs.cache-hit != 'true' }}
+        uses: ./.github/actions/linux-setup-vulkan
+        with:
+          path: ./vulkan_sdk
+          version: ${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Configure Android Vulkan shader toolchain
+        id: android_vulkan_toolchain
+        if: ${{ matrix.build == 'arm64-vulkan' }}
+        run: |
+          test -x "$PWD/vulkan_sdk/bin/glslc"
+          test -r "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/31/libvulkan.so"
+          echo "QVAC_VULKAN_GLSLC=$PWD/vulkan_sdk/bin/glslc" >> "$GITHUB_ENV"
+          "$PWD/vulkan_sdk/bin/glslc" --version
 
       - name: Install OpenCL Headers and Libs
         id: install_opencl
@@ -1402,9 +1434,20 @@ jobs:
       - name: Build
         id: ndk_build
         run: |
-          cmake ${{ matrix.defines }} -B build
+          cmake ${{ matrix.defines }} ${QVAC_VULKAN_GLSLC:+-DVulkan_GLSLC_EXECUTABLE=$QVAC_VULKAN_GLSLC} -B build
           cmake --build build
           cmake --install build --prefix pkg-adb/llama.cpp
+
+      - name: Pack Android NDK artifacts
+        id: pack_ndk_artifacts
+        run: |
+          tar -czf llama-android-${{ matrix.build }}.tar.gz -C pkg-adb llama.cpp
+
+      - name: Upload Android NDK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: llama-android-${{ matrix.build }}.tar.gz
+          name: llama-android-${{ matrix.build }}.tar.gz
 
       - name: Test
         id: cmake_test
