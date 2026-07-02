@@ -1,0 +1,100 @@
+name: Android Vulkan artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/build-android-vulkan-artifact.yml"
+      - "**/CMakeLists.txt"
+      - "**/*.cmake"
+      - "**/*.h"
+      - "**/*.hpp"
+      - "**/*.c"
+      - "**/*.cpp"
+      - "**/*.comp"
+      - "**/*.glsl"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-arm64-vulkan:
+    name: Android arm64 Vulkan tools
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android NDK and build dependencies
+        run: |
+          sdkmanager "ndk;27.2.12479018"
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates \
+            cmake \
+            ninja-build \
+            xz-utils \
+            zip
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          curl -fsSL \
+            https://sdk.lunarg.com/sdk/download/1.4.350.0/linux/vulkansdk-linux-x86_64-1.4.350.0.tar.xz \
+            -o /tmp/vulkansdk-linux-x86_64-1.4.350.0.tar.xz
+          mkdir -p "$RUNNER_TEMP/vulkan-sdk"
+          tar -xf /tmp/vulkansdk-linux-x86_64-1.4.350.0.tar.xz -C "$RUNNER_TEMP/vulkan-sdk"
+          LUNARG_VULKAN_SDK="$RUNNER_TEMP/vulkan-sdk/1.4.350.0/x86_64"
+          "$LUNARG_VULKAN_SDK/bin/glslc" --version
+          "$LUNARG_VULKAN_SDK/bin/glslc" \
+            -fshader-stage=compute \
+            --target-env=vulkan1.3 \
+            ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/integer_dot.comp \
+            -o /tmp/integer_dot.spv
+          echo "LUNARG_VULKAN_SDK=$LUNARG_VULKAN_SDK" >> "$GITHUB_ENV"
+          sudo cp -r "$LUNARG_VULKAN_SDK/include/." "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/"
+
+      - name: Configure
+        run: |
+          cmake -B build-android-arm64-vulkan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-31 \
+            -DANDROID_STL=c++_shared \
+            -DVulkan_GLSLC_EXECUTABLE="$LUNARG_VULKAN_SDK/bin/glslc" \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU_ARM_ARCH=armv8.5-a+fp16+i8mm \
+            -DGGML_VULKAN=ON \
+            -DGGML_OPENMP=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF
+
+      - name: Build tools
+        run: |
+          cmake --build build-android-arm64-vulkan \
+            --target llama-bench llama-cli llama-server llama-mtmd-cli \
+            -j "$(nproc)"
+
+      - name: Package tools
+        run: |
+          mkdir -p package/android-arm64-vulkan
+          cp build-android-arm64-vulkan/bin/llama-bench package/android-arm64-vulkan/
+          cp build-android-arm64-vulkan/bin/llama-cli package/android-arm64-vulkan/
+          cp build-android-arm64-vulkan/bin/llama-server package/android-arm64-vulkan/
+          cp build-android-arm64-vulkan/bin/llama-mtmd-cli package/android-arm64-vulkan/
+          cp build-android-arm64-vulkan/bin/*.so* package/android-arm64-vulkan/ || true
+          cp "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" package/android-arm64-vulkan/
+          (cd package && zip -r android-arm64-vulkan-binaries.zip android-arm64-vulkan)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: android-arm64-vulkan-binaries
+          path: package/android-arm64-vulkan-binaries.zip
