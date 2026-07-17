@@ -46,7 +46,8 @@ jobs:
             libvulkan-dev \
             xz-utils \
             zip
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/27.2.12479018"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
           curl -fsSL \
             https://sdk.lunarg.com/sdk/download/1.4.350.0/linux/vulkansdk-linux-x86_64-1.4.350.0.tar.xz \
             -o /tmp/vulkansdk-linux-x86_64-1.4.350.0.tar.xz
