@@ -744,7 +744,13 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
 }
 
 bool llama_model_base::load_tensors(llama_model_loader & ml) {
-    return llama_model::load_tensors(ml);
+    // Per-architecture loaders use create_tensor(), which dispatches through
+    // this loader pointer. Keep it valid while the legacy outer loader invokes
+    // a polymorphic load_arch_tensors() implementation.
+    this->ml = &ml;
+    const bool result = llama_model::load_tensors(ml);
+    this->ml = nullptr;
+    return result;
 }
 
 // qvac: factory mapping arch enum → concrete subclass. Mirrors upstream
