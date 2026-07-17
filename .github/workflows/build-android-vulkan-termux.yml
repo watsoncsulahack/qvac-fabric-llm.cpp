@@ -28,7 +28,9 @@ jobs:
           sdkmanager "ndk;${NDK_VERSION}"
           ndk="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
           # Android's NDK omits the header-only Vulkan-Hpp API used by ggml.
-          sudo cp -a /usr/include/vulkan/. "$ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan/"
+          sysroot="$ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          sudo cp -a /usr/include/vulkan/. "$sysroot/usr/include/vulkan/"
+          sudo cp -a /usr/include/spirv "$sysroot/usr/include/"
           echo "ANDROID_NDK=$ndk" >> "$GITHUB_ENV"
       - name: Configure and build
         run: |
