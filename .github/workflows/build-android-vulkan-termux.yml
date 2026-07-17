@@ -24,9 +24,12 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslc ninja-build spirv-headers
+          sudo apt-get install -y glslc ninja-build spirv-headers libvulkan-dev
           sdkmanager "ndk;${NDK_VERSION}"
-          echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          ndk="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          # Android's NDK omits the header-only Vulkan-Hpp API used by ggml.
+          sudo cp -a /usr/include/vulkan/. "$ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan/"
+          echo "ANDROID_NDK=$ndk" >> "$GITHUB_ENV"
       - name: Configure and build
         run: |
           cmake -S . -B build -G Ninja \
