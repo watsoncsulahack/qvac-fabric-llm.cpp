@@ -15,6 +15,7 @@ on:
       - "**/*.cpp"
       - "**/*.comp"
       - "**/*.glsl"
+      - "scripts/android-vulkan/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -74,7 +75,11 @@ jobs:
             -DGGML_VULKAN=ON \
             -DGGML_OPENMP=OFF \
             -DLLAMA_CURL=OFF \
-            -DLLAMA_BUILD_TESTS=OFF
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_UI=OFF \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN:/system/lib64' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
 
       - name: Build tools
         run: |
@@ -85,12 +90,15 @@ jobs:
       - name: Package tools
         run: |
           mkdir -p package/android-arm64-vulkan
+          cp scripts/android-vulkan/* package/android-arm64-vulkan/
           cp build-android-arm64-vulkan/bin/llama-bench package/android-arm64-vulkan/
           cp build-android-arm64-vulkan/bin/llama-cli package/android-arm64-vulkan/
           cp build-android-arm64-vulkan/bin/llama-server package/android-arm64-vulkan/
-          cp build-android-arm64-vulkan/bin/llama-mtmd-cli package/android-arm64-vulkan/
+          cp build-android-arm64-vulkan/bin/llama-mtmd-cli package/android-arm64-vulkan/ || true
           cp build-android-arm64-vulkan/bin/*.so* package/android-arm64-vulkan/ || true
           cp "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" package/android-arm64-vulkan/
+          rm -f package/android-arm64-vulkan/libvulkan.so package/android-arm64-vulkan/libvulkan.so.1 || true
+          chmod +x package/android-arm64-vulkan/*.sh package/android-arm64-vulkan/llama-* || true
           (cd package && zip -r android-arm64-vulkan-binaries.zip android-arm64-vulkan)
 
       - name: Upload artifact
