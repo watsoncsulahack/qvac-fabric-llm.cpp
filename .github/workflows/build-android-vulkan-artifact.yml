@@ -61,7 +61,10 @@ jobs:
             -o /tmp/integer_dot.spv
           echo "LUNARG_VULKAN_SDK=$LUNARG_VULKAN_SDK" >> "$GITHUB_ENV"
           sudo cp -r "$LUNARG_VULKAN_SDK/include/." "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/"
-          sudo cp -r /usr/include/vulkan "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/"
+          sudo cp -r /usr/include/vulkan "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/" || true
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Hpp.git "$RUNNER_TEMP/Vulkan-Hpp"
+          sudo mkdir -p "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan"
+          sudo cp "$RUNNER_TEMP/Vulkan-Hpp"/vulkan/*.hpp "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan/"
 
       - name: Configure
         run: |
@@ -71,6 +74,7 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-31 \
             -DANDROID_STL=c++_shared \
+            -DCMAKE_CXX_FLAGS="-isystem $ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
             -DVulkan_GLSLC_EXECUTABLE="$LUNARG_VULKAN_SDK/bin/glslc" \
             -DGGML_NATIVE=OFF \
             -DGGML_CPU_ARM_ARCH=armv8.5-a+fp16+i8mm \
