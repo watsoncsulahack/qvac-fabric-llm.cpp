@@ -24,7 +24,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslc ninja-build
+          sudo apt-get install -y glslc ninja-build spirv-headers
           sdkmanager "ndk;${NDK_VERSION}"
           echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
       - name: Configure and build
